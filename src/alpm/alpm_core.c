@@ -1,4 +1,5 @@
 #include "alpm_internal.h"
+#include "privilege.h"
 
 #include <stdlib.h>
 
@@ -14,6 +15,10 @@ alpm_errno_t axon_alpm_init(axon_alpm_t **core, const char *root,
 
     if(*core != NULL) {
         return(ALPM_ERR_HANDLE_NOT_NULL);
+    }
+
+    if(axon_privilege_check(0) != AXON_PRIVILEGE_OK) {
+        return(ALPM_ERR_BADPERMS);
     }
 
     if(root == NULL) {

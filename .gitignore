@@ -29,6 +29,7 @@
 *.dylib
 
 # Executables
+/axon
 *.exe
 *.out
 *.app

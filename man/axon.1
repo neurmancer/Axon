@@ -1,0 +1,164 @@
+.TH AXON 1 "2026-10-11" "Axon" "User Commands"
+.SH NAME
+axon \- query installed packages and cached Arch repositories
+.SH SYNOPSIS
+.B axon
+.RB [ \-\-config " PATH" ]
+.B \-Q
+.PP
+.B axon
+.RB [ \-\-config " PATH" ]
+.B \-Qi
+.IR PACKAGE ...
+.PP
+.B axon
+.RB [ \-\-config " PATH" ]
+.B \-Ss
+.IR PATTERN ...
+.PP
+.B axon \-\-help
+.SH DESCRIPTION
+Axon is a C frontend to libalpm for the NeurOS distribution project.
+The current command-line interface lists installed packages, displays
+installed-package metadata, and searches locally cached repository databases.
+It does not install, remove, upgrade, or download packages, or refresh repositories.
+.PP
+Select exactly one operation:
+.B \-Q
+or
+.BR \-S .
+The information and search flags modify those operations; they are not
+standalone commands.
+Output is written to standard output and diagnostics to standard error.
+.SH OPTIONS
+.TP
+.BR \-Q ", " \-\-query
+List installed package names and versions, one package per line.
+Without
+.BR \-i ,
+this operation takes no package arguments.
+.TP
+.BR \-i ", " \-\-info
+With
+.BR \-Q ,
+show the name, version, description, architecture, URL, installed size in bytes,
+and installation reason for each named installed package.
+At least one exact package name is required.
+Missing packages are reported as errors; remaining names are still processed.
+.TP
+.BR \-S ", " \-\-sync
+Select repository queries.
+Currently requires
+.BR \-s .
+This flag does not synchronize or update databases.
+.TP
+.BR \-s ", " \-\-search
+With
+.BR \-S ,
+search cached repository data using libalpm regular expressions.
+At least one pattern is required, and all patterns must match.
+Matching packages are printed as repository/name and version, followed by
+the description.
+The same package may appear in multiple repositories.
+No matches produces empty output and a successful exit status.
+Missing or unreadable database caches produce an error.
+.TP
+.BI \-\-config " PATH"
+Read configuration from
+.I PATH
+instead of
+.IR /etc/pacman.conf .
+The form
+.BI \-\-config= PATH
+is also accepted.
+.TP
+.BR \-h ", " \-\-help
+Display usage and exit without loading configuration.
+The process identity check still applies.
+.TP
+.B \-\-
+End option processing.
+Use this before a package name or pattern beginning with a dash.
+.SH CONFIGURATION
+Axon reads pacman-style options and repository sections, including
+Include directives, mirror substitutions, and signature policies.
+Relative Include paths are resolved against the process working directory.
+.PP
+The reader rejects unknown directives, invalid values, duplicate repositories,
+missing includes, include cycles, and configured resource-limit violations.
+It is intentionally stricter than pacman for some malformed configurations.
+Comments must occupy a whole line; an inline hash character is retained.
+.PP
+XferCommand is parsed but is not supported by backend setup.
+A configuration containing it causes an explicit error, including for queries.
+Frontend settings such as Color are retained but are not implemented by this
+basic interface.
+.PP
+Query commands do not begin transactions or refresh databases.
+Backend initialization follows libalpm's filesystem behavior and may create
+database directories where permitted.
+.SH PRIVILEGES
+These query operations do not require root, but the configuration and databases
+must be accessible to the invoking user.
+Axon does not request passwords or automatically elevate privileges.
+.PP
+Setuid/setgid-style execution, mismatched real/effective/saved identities,
+and secure-execution launches are rejected.
+Install Axon as a normal executable without setuid/setgid bits or file capabilities.
+.SH EXIT STATUS
+.TP
+.B 0
+The operation completed successfully, including a search with no matches.
+.TP
+.B 1
+A configuration, privilege, backend, or output error occurred, or a requested
+installed package was not found.
+.TP
+.B 2
+An option, operation combination, or required argument was invalid.
+.SH FILES
+.TP
+.I /etc/pacman.conf
+Default configuration file.
+.TP
+.I /var/lib/pacman/local/
+Default installed-package database.
+.TP
+.I /var/lib/pacman/sync/
+Default cached repository databases.
+.PP
+RootDir and DBPath configuration can change the database locations.
+.SH EXAMPLES
+List installed packages:
+.PP
+.nf
+    axon \-Q
+.fi
+.PP
+Inspect two installed packages:
+.PP
+.nf
+    axon \-Qi pacman glibc
+.fi
+.PP
+Use the equivalent long options:
+.PP
+.nf
+    axon \-\-query \-\-info pacman
+.fi
+.PP
+Search cached repositories, quoting the pattern to prevent shell expansion:
+.PP
+.nf
+    axon \-Ss '^pacman$'
+.fi
+.PP
+Use an alternate configuration:
+.PP
+.nf
+    axon \-\-config /path/to/pacman.conf \-Q
+.fi
+.SH SEE ALSO
+.BR pacman (8),
+.BR pacman.conf (5),
+.BR libalpm (3)

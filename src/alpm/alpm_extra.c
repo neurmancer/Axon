@@ -1,5 +1,6 @@
 #include "alpm_extra.h"
 #include "alpm_internal.h"
+#include "privilege.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,10 @@ static alpm_errno_t building(axon_alpm_t *core)
 
     if(core->transaction != AXON_TRANS_BUILDING) {
         return(ALPM_ERR_TRANS_NOT_INITIALIZED);
+    }
+
+    if(axon_privilege_check(1) != AXON_PRIVILEGE_OK) {
+        return(ALPM_ERR_BADPERMS);
     }
 
     return(ALPM_ERR_OK);
@@ -270,6 +275,10 @@ alpm_errno_t axon_alpm_refresh(axon_alpm_t *core, int force, int *changed)
         return(error);
     }
 
+    if(axon_privilege_check(1) != AXON_PRIVILEGE_OK) {
+        return(ALPM_ERR_BADPERMS);
+    }
+
     databases = alpm_get_syncdbs(core->handle);
     if(databases == NULL) {
         return(ALPM_ERR_DB_NULL);
@@ -358,6 +367,20 @@ alpm_errno_t axon_alpm_search(axon_alpm_t *core, int sync,
 
     for(alpm_list_t *item = databases; item; item = item->next) {
         alpm_list_t *matches = NULL;
+        if(sync && alpm_db_get_valid(item->data) < 0) {
+            alpm_errno_t error = alpm_errno(core->handle);
+            alpm_list_free(results);
+            return(error);
+        }
+
+        if(alpm_db_get_pkgcache(item->data) == NULL) {
+            alpm_errno_t error = alpm_errno(core->handle);
+            if(error != ALPM_ERR_OK) {
+                alpm_list_free(results);
+                return(error);
+            }
+        }
+
         if(alpm_db_search(item->data, patterns, &matches) < 0) {
             alpm_errno_t error = alpm_errno(core->handle);
             alpm_list_free(matches);
@@ -446,6 +469,10 @@ alpm_errno_t axon_alpm_set_reason(axon_alpm_t *core, const char *name,
         return(ALPM_ERR_WRONG_ARGS);
     }
 
+    if(axon_privilege_check(1) != AXON_PRIVILEGE_OK) {
+        return(ALPM_ERR_BADPERMS);
+    }
+
     error = axon_alpm_local_package(core, name, &package);
     if(error != ALPM_ERR_OK) {
         return(error);
@@ -466,6 +493,14 @@ alpm_errno_t axon_alpm_transaction_begin(axon_alpm_t *core, int flags)
     alpm_errno_t error = idle(core);
     if(error != ALPM_ERR_OK) {
         return(error);
+    }
+
+    if(axon_privilege_check(1) != AXON_PRIVILEGE_OK) {
+        return(ALPM_ERR_BADPERMS);
+    }
+
+    if(flags & ALPM_TRANS_FLAG_NOLOCK) {
+        return(ALPM_ERR_WRONG_ARGS);
     }
 
     error = status(core, alpm_trans_init(core->handle, flags));
@@ -602,6 +637,10 @@ alpm_errno_t axon_alpm_transaction_commit(axon_alpm_t *core,
 
     else if(core->transaction != AXON_TRANS_PREPARED) {
         problem->code = ALPM_ERR_TRANS_NOT_PREPARED;
+    }
+
+    else if(axon_privilege_check(1) != AXON_PRIVILEGE_OK) {
+        problem->code = ALPM_ERR_BADPERMS;
     }
 
     else {

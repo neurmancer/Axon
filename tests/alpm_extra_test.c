@@ -1,6 +1,7 @@
 #define _XOPEN_SOURCE 700
 
 #include "alpm_extra.h"
+#include "privilege.h"
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -22,6 +23,12 @@
 } while(0)
 
 static unsigned int events;
+
+axon_privilege_result_t __wrap_axon_privilege_check(int require_root)
+{
+    (void)require_root;
+    return(AXON_PRIVILEGE_OK);
+}
 
 static void event_callback(void *context, alpm_event_t *event)
 {
