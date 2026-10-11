@@ -1,0 +1,406 @@
+#define _XOPEN_SOURCE 700
+
+#include "operation.h"
+#include "alpm_extra.h"
+
+#include <archive.h>
+#include <archive_entry.h>
+#include <assert.h>
+#include <ftw.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static int authorized = 1;
+static axon_operation_result_t result;
+static const int safe_flags = ALPM_TRANS_FLAG_NOHOOKS | ALPM_TRANS_FLAG_NOSCRIPTLET;
+
+axon_privilege_result_t __wrap_axon_privilege_check(int require_root)
+{
+    return(require_root && !authorized ? AXON_PRIVILEGE_ROOT_REQUIRED : AXON_PRIVILEGE_OK);
+}
+
+#define EXPECT(call, expected) do { \
+    axon_operation_status_t status = (call); \
+    if(status != (expected)) { \
+        fprintf(stderr, "%s:%d: %s returned %d, expected %d (alpm %s)\n", \
+                __FILE__, __LINE__, #call, status, expected, alpm_strerror(result.backend_error)); \
+        for(alpm_list_t *item = result.diagnostics; item; item = item->next) { \
+            fprintf(stderr, "%s\n", (char *)item->data); \
+        } \
+        abort(); \
+    } \
+} while(0)
+
+struct package {
+    const char *name;
+    const char *version;
+    int size;
+    const char *dependency;
+    const char *replaces;
+    const char *group;
+    const char *architecture;
+    char path[512];
+};
+
+static void archive_item(struct archive *archive, const char *name, const char *text)
+{
+    struct archive_entry *entry = archive_entry_new();
+    assert(entry != NULL);
+    archive_entry_set_pathname(entry, name);
+    archive_entry_set_filetype(entry, AE_IFREG);
+    archive_entry_set_perm(entry, 0644);
+    archive_entry_set_uid(entry, getuid());
+    archive_entry_set_gid(entry, getgid());
+    archive_entry_set_size(entry, (la_int64_t)strlen(text));
+    assert(archive_write_header(archive, entry) == ARCHIVE_OK);
+    assert(archive_write_data(archive, text, strlen(text)) == (la_ssize_t)strlen(text));
+    archive_entry_free(entry);
+}
+
+static struct archive *archive_open(const char *path)
+{
+    struct archive *archive = archive_write_new();
+    assert(archive != NULL);
+    assert(archive_write_set_format_pax_restricted(archive) == ARCHIVE_OK);
+    assert(archive_write_open_filename(archive, path) == ARCHIVE_OK);
+    return(archive);
+}
+
+static void archive_close(struct archive *archive)
+{
+    assert(archive_write_close(archive) == ARCHIVE_OK);
+    assert(archive_write_free(archive) == ARCHIVE_OK);
+}
+
+static void make_package(struct package *package, const char *directory)
+{
+    snprintf(package->path, sizeof(package->path), "%s/%s-%s-any.pkg.tar",
+             directory, package->name, package->version);
+    char metadata[2048];
+    int length = snprintf(metadata, sizeof(metadata),
+        "pkgname = %s\npkgver = %s\npkgdesc = Operation fixture\nsize = %d\narch = %s\n"
+        "%s%s\n%s%s\n%s%s\n",
+        package->name, package->version, package->size,
+        package->architecture != NULL ? package->architecture : "any",
+        package->dependency != NULL ? "depend = " : "", package->dependency != NULL ? package->dependency : "",
+        package->replaces != NULL ? "replaces = " : "", package->replaces != NULL ? package->replaces : "",
+        package->group != NULL ? "group = " : "", package->group != NULL ? package->group : "");
+    assert(length > 0 && (size_t)length < sizeof(metadata));
+    struct archive *archive = archive_open(package->path);
+    archive_item(archive, ".PKGINFO", metadata);
+    if(strcmp(package->name, "collision") == 0) {
+        archive_item(archive, "busy.txt", "new content\n");
+    }
+    archive_close(archive);
+}
+
+static void make_repository(const char *path, struct package *packages, size_t count)
+{
+    struct archive *archive = archive_open(path);
+    for(size_t index = 0; index < count; index++) {
+        struct package *package = &packages[index];
+        char *hash = alpm_compute_sha256sum(package->path);
+        struct stat info;
+        assert(hash != NULL && stat(package->path, &info) == 0);
+        char metadata[4096];
+        int length = snprintf(metadata, sizeof(metadata),
+            "%%NAME%%\n%s\n\n%%VERSION%%\n%s\n\n%%DESC%%\nOperation fixture\n\n"
+            "%%FILENAME%%\n%s-%s-any.pkg.tar\n\n%%ARCH%%\nany\n\n"
+            "%%CSIZE%%\n%lld\n\n%%ISIZE%%\n%d\n\n%%SHA256SUM%%\n%s\n\n"
+            "%s%s\n\n%s%s\n\n%s%s\n\n",
+            package->name, package->version, package->name, package->version,
+            (long long)info.st_size, package->size, hash,
+            package->dependency != NULL ? "%DEPENDS%\n" : "", package->dependency != NULL ? package->dependency : "",
+            package->replaces != NULL ? "%REPLACES%\n" : "", package->replaces != NULL ? package->replaces : "",
+            package->group != NULL ? "%GROUPS%\n" : "", package->group != NULL ? package->group : "");
+        assert(length > 0 && (size_t)length < sizeof(metadata));
+        free(hash);
+        char entry[256];
+        snprintf(entry, sizeof(entry), "%s-%s/desc", package->name, package->version);
+        archive_item(archive, entry, metadata);
+    }
+    archive_close(archive);
+}
+
+static const axon_plan_entry_t *entry(const axon_operation_plan_t *plan, const char *name)
+{
+    for(size_t index = 0; index < plan->count; index++) {
+        if(strcmp(plan->entries[index].name, name) == 0) {
+            return(&plan->entries[index]);
+        }
+    }
+    return(NULL);
+}
+
+static axon_operation_approval_t approval(axon_operation_t *operation)
+{
+    const axon_operation_plan_t *plan = axon_operation_plan(operation);
+    axon_operation_approval_t approved = {.plan_id = plan->id, .confirm = 1, .approved_flags = plan->flags};
+    return(approved);
+}
+
+static void release(axon_operation_t **operation)
+{
+    EXPECT(axon_operation_free(operation, &result), AXON_OPERATION_OK);
+    assert(*operation == NULL && access("db/db.lck", F_OK) != 0);
+}
+
+static void installed(const axon_config_t *config, const char *name, const char *version,
+                       alpm_pkgreason_t reason)
+{
+    axon_alpm_t *core = NULL;
+    axon_config_error_t error;
+    assert(axon_config_open(config, &core, &error) == AXON_CONFIG_OK);
+    alpm_pkg_t *package = NULL;
+    assert(axon_alpm_local_package(core, name, &package) == ALPM_ERR_OK);
+    assert(strcmp(alpm_pkg_get_version(package), version) == 0);
+    assert(alpm_pkg_get_reason(package) == reason);
+    assert(axon_alpm_release(&core) == 0);
+}
+
+static int remove_entry(const char *path, const struct stat *info, int type, struct FTW *walk)
+{
+    (void)info;
+    (void)type;
+    (void)walk;
+    return(remove(path));
+}
+
+int main(void)
+{
+    char *previous = getcwd(NULL, 0);
+    char temporary[] = "/tmp/axon-operation-XXXXXX";
+    assert(previous != NULL && mkdtemp(temporary) != NULL && chdir(temporary) == 0);
+    const char *directories[] = {"db", "db/local", "root", "cache", "first", "second", "files"};
+    for(size_t index = 0; index < sizeof(directories) / sizeof(directories[0]); index++) {
+        assert(mkdir(directories[index], 0700) == 0);
+    }
+    struct package locals[] = {
+        {.name = "essential", .version = "1-1", .size = 10},
+        {.name = "consumer", .version = "1-1", .size = 20, .dependency = "essential>=1"},
+        {.name = "legacy", .version = "1-1", .size = 7},
+        {.name = "versioned", .version = "2-1", .size = 9},
+        {.name = "versioned", .version = "1-1", .size = 8},
+        {.name = "badarch", .version = "1-1", .size = 1, .architecture = "wrong"},
+        {.name = "collision", .version = "1-1", .size = 12}
+    };
+    struct package packages[] = {
+        {.name = "essential", .version = "2-1", .size = 12, .dependency = "helper>=1"},
+        {.name = "helper", .version = "1-1", .size = 5},
+        {.name = "application", .version = "1-1", .size = 15, .dependency = "helper>=1"},
+        {.name = "substitute", .version = "1-1", .size = 11, .replaces = "legacy"},
+        {.name = "ignored", .version = "1-1", .size = 3, .group = "ignored-group"}
+    };
+    struct package lower_priority = {.name = "essential", .version = "3-1", .size = 14};
+    for(size_t index = 0; index < sizeof(locals) / sizeof(locals[0]); index++) {
+        make_package(&locals[index], "files");
+    }
+    for(size_t index = 0; index < sizeof(packages) / sizeof(packages[0]); index++) {
+        make_package(&packages[index], "first");
+    }
+    make_package(&lower_priority, "second");
+    make_repository("first/first.db", packages, sizeof(packages) / sizeof(packages[0]));
+    make_repository("second/second.db", &lower_priority, 1);
+    FILE *file = fopen("pacman.conf", "w");
+    assert(file != NULL);
+    fprintf(file, "[options]\nRootDir = %s/root\nDBPath = %s/db\nCacheDir = %s/cache\n"
+            "LogFile = %s/log\nGPGDir = %s/keyring\nArchitecture = x86_64\nSigLevel = Never\n"
+            "HoldPkg = ess* cons* leg*\nIgnoreGroup = ignored-group\n"
+            "[first]\nServer = file://%s/first\n[second]\nServer = file://%s/second\n",
+            temporary, temporary, temporary, temporary, temporary, temporary, temporary);
+    assert(fclose(file) == 0);
+    axon_config_t *config = NULL;
+    axon_config_error_t config_error;
+    assert(axon_config_load("pacman.conf", &config, &config_error) == AXON_CONFIG_OK);
+    axon_operation_t *operation = NULL;
+    axon_operation_target_t targets[4];
+    for(size_t index = 0; index < 4; index++) {
+        targets[index] = (axon_operation_target_t){.name = locals[index].path};
+    }
+    axon_operation_request_t request = {.kind = AXON_OPERATION_FILE, .targets = targets,
+                                        .target_count = 4, .flags = safe_flags};
+    authorized = 0;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_PRIVILEGE);
+    EXPECT(axon_operation_refresh(config, 0, &result), AXON_OPERATION_PRIVILEGE);
+    assert(operation == NULL && access("db/db.lck", F_OK) != 0);
+    authorized = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    const axon_operation_plan_t *plan = axon_operation_plan(operation);
+    assert(plan->count == 4 && plan->installed_delta == 46 && plan->download_bytes == 0);
+    axon_operation_approval_t approved = approval(operation);
+    approved.plan_id++;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_APPROVAL);
+    approved = approval(operation);
+    approved.approved_flags = 0;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_APPROVAL);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    assert(result.committed && result.may_have_changes && access("db/db.lck", F_OK) != 0);
+    assert(strcmp(plan->entries[0].new_version, "1-1") == 0);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_STATE);
+    release(&operation);
+
+    targets[0] = (axon_operation_target_t){.name = "essential"};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_REMOVE, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_BACKEND);
+    assert(result.backend_error == ALPM_ERR_UNSATISFIED_DEPS && result.diagnostics != NULL);
+    assert(operation == NULL && access("db/db.lck", F_OK) != 0);
+    request.flags |= ALPM_TRANS_FLAG_CASCADE;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    plan = axon_operation_plan(operation);
+    assert(plan->count == 2 && plan->installed_delta == -30);
+    assert(entry(plan, "essential")->held && entry(plan, "consumer")->held);
+    assert(!entry(plan, "consumer")->explicit_target);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_POLICY);
+    const char *protected[] = {"ess*", "consumer"};
+    approved.protected_removals = protected;
+    approved.protected_removal_count = 2;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_POLICY);
+    protected[0] = "essential";
+    uint64_t old_id = approved.plan_id;
+    EXPECT(axon_operation_cancel(operation, &result), AXON_OPERATION_OK);
+    release(&operation);
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(axon_operation_plan(operation)->id != old_id);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_APPROVAL);
+    release(&operation);
+    installed(config, "essential", "1-1", ALPM_PKG_REASON_EXPLICIT);
+
+    EXPECT(axon_operation_refresh(config, 1, &result), AXON_OPERATION_OK);
+    assert(result.refreshed);
+    file = fopen("pacman.conf", "a");
+    assert(file != NULL && fputs("[options]\nIgnorePkg = essential\n", file) >= 0);
+    assert(fclose(file) == 0);
+    axon_config_t *ignored_config = NULL;
+    assert(axon_config_load("pacman.conf", &ignored_config, &config_error) == AXON_CONFIG_OK);
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_UPGRADE, .flags = safe_flags,
+                                         .allow_replacements = 1};
+    EXPECT(axon_operation_prepare(ignored_config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(entry(axon_operation_plan(operation), "essential") == NULL);
+    release(&operation);
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_INSTALL, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(ignored_config, &request, &operation, &result), AXON_OPERATION_POLICY);
+    assert(operation == NULL && result.backend_error == ALPM_ERR_PKG_IGNORED);
+    axon_config_free(&ignored_config);
+    file = fopen("pacman.conf", "a");
+    assert(file != NULL && fputs("SigLevel = Required\n", file) >= 0);
+    assert(fclose(file) == 0);
+    axon_config_t *signed_config = NULL;
+    assert(axon_config_load("pacman.conf", &signed_config, &config_error) == AXON_CONFIG_OK);
+    targets[0] = (axon_operation_target_t){.name = locals[4].path};
+    request.kind = AXON_OPERATION_FILE;
+    EXPECT(axon_operation_prepare(signed_config, &request, &operation, &result), AXON_OPERATION_BACKEND);
+    assert(operation == NULL && result.backend_error == ALPM_ERR_PKG_MISSING_SIG);
+    axon_config_free(&signed_config);
+    targets[0] = (axon_operation_target_t){.name = "application"};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_INSTALL, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    plan = axon_operation_plan(operation);
+    assert(plan->count == 2 && plan->installed_delta == 20 && plan->download_bytes > 0);
+    assert(entry(plan, "helper")->reason == ALPM_PKG_REASON_DEPEND);
+    assert(!entry(plan, "helper")->explicit_target);
+    approved = approval(operation);
+    authorized = 0;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_PRIVILEGE);
+    authorized = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    release(&operation);
+    installed(config, "helper", "1-1", ALPM_PKG_REASON_DEPEND);
+    targets[0].name = "ignored";
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_POLICY);
+    assert(result.backend_error == ALPM_ERR_PKG_IGNORED && operation == NULL);
+
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_UPGRADE, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_QUESTION);
+    request.allow_replacements = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    plan = axon_operation_plan(operation);
+    assert(entry(plan, "essential")->kind == AXON_CHANGE_UPGRADE);
+    assert(strcmp(entry(plan, "essential")->new_version, "2-1") == 0);
+    assert(strcmp(entry(plan, "essential")->old_version, "1-1") == 0);
+    assert(entry(plan, "legacy")->kind == AXON_CHANGE_REPLACE && entry(plan, "legacy")->held);
+    assert(strcmp(entry(plan, "legacy")->replaced_by, "substitute") == 0);
+    assert(plan->installed_delta == 6);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_POLICY);
+    const char *legacy[] = {"legacy"};
+    approved.protected_removals = legacy;
+    approved.protected_removal_count = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    release(&operation);
+    installed(config, "essential", "2-1", ALPM_PKG_REASON_EXPLICIT);
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(axon_operation_plan(operation)->count == 0);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    assert(!result.may_have_changes);
+    release(&operation);
+
+    targets[0] = (axon_operation_target_t){.name = "essential"};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_INSTALL, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags | ALPM_TRANS_FLAG_NEEDED};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(axon_operation_plan(operation)->count == 0);
+    release(&operation);
+    targets[0].repository = "second";
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(strcmp(entry(axon_operation_plan(operation), "essential")->new_version, "3-1") == 0);
+    release(&operation);
+
+    targets[0] = (axon_operation_target_t){.name = locals[4].path};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_FILE, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_POLICY);
+    request.allow_downgrade = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(entry(axon_operation_plan(operation), "versioned")->kind == AXON_CHANGE_DOWNGRADE);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_APPROVAL);
+    approved.approve_downgrades = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    release(&operation);
+    installed(config, "versioned", "1-1", ALPM_PKG_REASON_EXPLICIT);
+    targets[0].name = locals[5].path;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_BACKEND);
+    assert(result.backend_error == ALPM_ERR_PKG_INVALID_ARCH);
+    request.flags |= ALPM_TRANS_FLAG_NODEPS;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_ARGUMENT);
+    assert(access("db/db.lck", F_OK) != 0);
+
+    file = fopen("root/busy.txt", "w");
+    assert(file != NULL && fputs("existing content\n", file) >= 0);
+    assert(fclose(file) == 0);
+    targets[0] = (axon_operation_target_t){.name = locals[6].path};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_FILE, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_BACKEND);
+    assert(result.backend_error == ALPM_ERR_FILE_CONFLICTS && !result.committed && result.may_have_changes);
+    assert(result.diagnostics != NULL && access("db/db.lck", F_OK) != 0);
+    release(&operation);
+
+    targets[0] = (axon_operation_target_t){.name = "essential"};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_REMOVE, .targets = targets,
+                                         .target_count = 1, .flags = safe_flags | ALPM_TRANS_FLAG_CASCADE};
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    approved = approval(operation);
+    approved.protected_removals = protected;
+    approved.protected_removal_count = 2;
+    axon_config_free(&config);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    release(&operation);
+    axon_operation_result_clear(&result);
+    assert(chdir(previous) == 0);
+    free(previous);
+    assert(nftw(temporary, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
+    puts("Operation workflows, plans, and package policy checks passed.");
+    return(0);
+}

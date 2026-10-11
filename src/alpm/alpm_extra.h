@@ -60,6 +60,7 @@ alpm_errno_t axon_alpm_transaction_begin(axon_alpm_t *core, int flags);
 alpm_errno_t axon_alpm_transaction_install(axon_alpm_t *core,
                                          const char *repository, const char *name);
 alpm_errno_t axon_alpm_transaction_file(axon_alpm_t *core, const char *path);
+alpm_errno_t axon_alpm_transaction_package(axon_alpm_t *core, alpm_pkg_t *package);
 alpm_errno_t axon_alpm_transaction_remove(axon_alpm_t *core, const char *name);
 alpm_errno_t axon_alpm_transaction_upgrade(axon_alpm_t *core, int downgrade);
 alpm_errno_t axon_alpm_transaction_prepare(axon_alpm_t *core,

@@ -318,6 +318,16 @@ alpm_errno_t axon_alpm_sync_package(axon_alpm_t *core, const char *repository,
             continue;
         }
 
+        if(alpm_db_get_valid(database) < 0) {
+            return(alpm_errno(core->handle));
+        }
+        if(alpm_db_get_pkgcache(database) == NULL) {
+            alpm_errno_t error = alpm_errno(core->handle);
+            if(error != ALPM_ERR_OK) {
+                return(error);
+            }
+        }
+
         *package = alpm_db_get_pkg(database, name);
         if(*package != NULL) {
             return(ALPM_ERR_OK);
@@ -526,6 +536,19 @@ alpm_errno_t axon_alpm_transaction_install(axon_alpm_t *core,
         return(error);
     }
 
+    return(status(core, alpm_add_pkg(core->handle, package)));
+}
+
+alpm_errno_t axon_alpm_transaction_package(axon_alpm_t *core, alpm_pkg_t *package)
+{
+    alpm_errno_t error = building(core);
+    if(error != ALPM_ERR_OK) {
+        return(error);
+    }
+    if(package == NULL || alpm_pkg_get_handle(package) != core->handle
+            || alpm_pkg_get_origin(package) == ALPM_PKG_FROM_LOCALDB) {
+        return(ALPM_ERR_WRONG_ARGS);
+    }
     return(status(core, alpm_add_pkg(core->handle, package)));
 }
 
