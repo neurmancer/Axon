@@ -67,7 +67,7 @@ jobs:
     timeout-minutes: 20
     container:
       image: archlinux:base-devel
-      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+      options: --privileged
     defaults:
       run:
         shell: bash
@@ -84,6 +84,15 @@ jobs:
         run: |
           set -o pipefail
           runuser -u axonci -- make sanitize 2>&1 | tee sanitizers.log
+      - name: Sanitized privileged fixtures
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          set -o pipefail
+          test "$(id -u)" -eq 0
+          ./tests/privileged_test.out 2>&1 | tee -a sanitizers.log
+          unshare --user --map-root-user --mount --pid --fork --net ./tests/helper_failure_test.out 2>&1 | tee -a sanitizers.log
       - name: Preserve sanitizer output
         if: always()
         uses: actions/upload-artifact@v4

@@ -187,7 +187,7 @@ test-c: tests/alpm_extra_test.out tests/config_test.out tests/config_alloc_test.
 sanitize:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
-	$(MAKE) test CC=clang CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'
+	$(MAKE) test tests/privileged_test.out tests/helper_failure_test.out CC=clang CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'
 
 tests/inspection_test.out: tests/inspection_test.c libaxon-alpm.a axon
 	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -o $@

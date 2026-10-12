@@ -1,148 +1,273 @@
-.TH AXON 1 "2026-10-11" "Axon" "User Commands"
+.TH AXON 1 "2026-10-12" "Axon" "User Commands"
 .SH NAME
-axon \- query installed packages and cached Arch repositories
+axon \- manage NeurOS packages with libalpm
 .SH SYNOPSIS
 .B axon
 .RB [ \-\-config " PATH" ]
 .B \-Q
+.RI [ OPTIONS ]
+.RI [ PACKAGE ...]
 .PP
 .B axon
 .RB [ \-\-config " PATH" ]
-.B \-Qi
+.B \-S
+.RI [ OPTIONS ]
+.RI [ TARGET ...]
+.PP
+.B axon
+.RB [ \-\-config " PATH" ]
+.B \-U
+.RI [ OPTIONS ]
+.IR ARCHIVE ...
+.PP
+.B axon
+.RB [ \-\-config " PATH" ]
+.B \-R
+.RI [ OPTIONS ]
 .IR PACKAGE ...
 .PP
 .B axon
 .RB [ \-\-config " PATH" ]
-.B \-Ss
-.IR PATTERN ...
+.I MAINTENANCE-OPERATION
+.RI [ PACKAGE ...]
+.PP
+.B axon
+.RB [ \-\-config " PATH" ]
+.B \-\-ui
 .PP
 .B axon \-\-help
 .SH DESCRIPTION
-Axon is a C frontend to libalpm for the NeurOS distribution project.
-The current command-line interface lists installed packages, displays
-installed-package metadata, and searches locally cached repository databases.
-It does not install, remove, upgrade, or download packages, or refresh repositories.
+Axon is a C frontend to libalpm for NeurOS. It queries installed packages and
+cached repositories, prepares and approves package transactions, and provides
+maintenance commands and an interactive terminal browser.
+It targets pacman 7.1 and libalpm ABI 16.
 .PP
-Select exactly one operation:
+Select one operation. Query modifiers apply to
 .B \-Q
 or
-.BR \-S .
-The information and search flags modify those operations; they are not
-standalone commands.
-Output is written to standard output and diagnostics to standard error.
-.SH OPTIONS
-.TP
-.BR \-Q ", " \-\-query
-List installed package names and versions, one package per line.
-Without
-.BR \-i ,
-this operation takes no package arguments.
-.TP
-.BR \-i ", " \-\-info
-With
-.BR \-Q ,
-show the name, version, description, architecture, URL, installed size in bytes,
-and installation reason for each named installed package.
-At least one exact package name is required.
-Missing packages are reported as errors; remaining names are still processed.
-.TP
-.BR \-S ", " \-\-sync
-Select repository queries.
-Currently requires
-.BR \-s .
-This flag does not synchronize or update databases.
-.TP
-.BR \-s ", " \-\-search
-With
-.BR \-S ,
-search cached repository data using libalpm regular expressions.
-At least one pattern is required, and all patterns must match.
-Matching packages are printed as repository/name and version, followed by
-the description.
-The same package may appear in multiple repositories.
-No matches produces empty output and a successful exit status.
-Missing or unreadable database caches produce an error.
+.BR \-S ;
+short options may have different meanings for removals.
+Queries use cached data and do not refresh repositories.
+Output goes to standard output; diagnostics and approval prompts go to standard error.
+.SH GENERAL OPTIONS
 .TP
 .BI \-\-config " PATH"
-Read configuration from
-.I PATH
-instead of
-.IR /etc/pacman.conf .
-The form
-.BI \-\-config= PATH
-is also accepted.
+Read PATH instead of /etc/pacman.conf. The form \-\-config=PATH is accepted.
+RootDir and DBPath are configured in this file; command-line root/sysroot
+overrides are not implemented.
 .TP
 .BR \-h ", " \-\-help
-Display usage and exit without loading configuration.
-The process identity check still applies.
+Display usage without loading configuration. The process identity check still applies.
 .TP
 .B \-\-
-End option processing.
-Use this before a package name or pattern beginning with a dash.
+End option processing before targets that begin with a dash.
+.SH QUERIES
+.TP
+.BR \-Q ", " \-\-query
+List installed names and versions. Exact package arguments restrict the list;
+omitting them selects all installed packages.
+.TP
+.BR \-i ", " \-\-info
+Show package details with \-Q or \-S. Omitted names select all packages.
+Repository names may be qualified as REPOSITORY/PACKAGE.
+Missing requested packages fail the command while other targets are processed.
+.TP
+.BR \-s ", " \-\-search
+With \-Q or \-S, search descriptions and names using libalpm regular expressions.
+All supplied patterns must match; omitted patterns list all eligible packages.
+Repository searches honor Usage=Search. Repository duplicates remain visible.
+No matches is a successful empty result. Unreadable caches are errors.
+.TP
+.BR \-l ", " \-\-list
+With \-Q, list installed paths for the selected packages or all installed packages.
+.TP
+.BR \-o ", " \-\-owns
+With \-Q, find installed owners of the supplied paths. At least one path is required.
+Parent paths are resolved while the final symlink retains its identity.
+Bare executable names are not searched through PATH.
+.TP
+.BR \-g ", " \-\-groups
+With \-Q, list installed group members. With \-S and no group arguments, list
+group names; repeating the flag (\-Sgg) lists members. Named groups list members.
+.TP
+.BR \-m ", " \-\-foreign
+With \-Q, select packages absent from configured repository databases.
+.TP
+.BR \-n ", " \-\-native
+With \-Q, select packages present in configured repository databases.
+.TP
+.BR \-e ", " \-\-explicit
+With \-Q, select explicitly installed packages.
+.TP
+.BR \-d ", " \-\-deps
+With \-Q, select packages installed as dependencies.
+.PP
+Native/foreign and explicit/dependency filters may be combined, but opposing
+filters cannot. File ownership cannot be combined with these filters.
+.TP
+.BR \-k ", " \-\-check
+With \-Q, check installed-file presence. Repeat (\-Qkk) to compare recorded
+mtree type, permissions, owner/group, size, modification time and symlink targets.
+Omitted package names select all installed packages.
+.TP
+.B \-\-checksums
+With \-Qkk, also verify recorded SHA-256 or MD5 checksums.
+Missing metadata or checksum coverage is reported as an inspection error.
+.PP
+Modified backup configuration content is distinguished from damaged files;
+configuration type, permission and ownership errors still fail inspection.
+Diagnostics identify paths and packages and suggest recovery actions.
+Inspection neither repairs files nor removes database locks.
+.SH TRANSACTIONS
+.TP
+.BR \-S ", " \-\-sync
+Without query modifiers, install repository packages or groups.
+Targets may be qualified as REPOSITORY/NAME. All eligible group members are
+expanded into the approval plan; a numeric group subset chooser is not provided.
+.TP
+.BR \-U ", " \-\-upgrade
+Install local package archives. Despite its long option name, this operation
+requires archive paths; use \-Su or \-Syu for a full system upgrade.
+.TP
+.BR \-R ", " \-\-remove
+Remove installed packages after dependency resolution and approval.
+.TP
+.BR \-y ", " \-\-refresh
+With \-S, refresh repositories. Repeat to force refresh.
+\-Sy refreshes only; \-Syu refreshes before preparing a full upgrade.
+Refresh operations take no package targets. Refresh-plus-individual-install
+combinations are rejected to avoid partial upgrades.
+.TP
+.BR \-u ", " \-\-sysupgrade
+With \-S, prepare a full system upgrade. \-Su uses cached repositories;
+\-Syu requires a successful refresh before preparation. Package targets are not accepted.
+.TP
+.B \-\-needed
+With repository installs, local archives or full upgrades, skip already-current packages.
+.TP
+.B \-\-allow-downgrade
+Permit a downgrade plan for installs or upgrades. Separate confirmation is still required.
+.SS Removal modifiers
+.TP
+.BR \-s ", " \-\-recursive
+Remove dependencies no longer needed by other packages.
+Repeat (\-Rss) to include explicitly installed dependencies.
+.TP
+.BR \-c ", " \-\-cascade
+Include packages that depend on the removal targets.
+.TP
+.BR \-n ", " \-\-nosave
+Omit backup-file preservation during removal.
+.TP
+.BR \-u ", " \-\-unneeded
+Keep targets required by other installed packages.
+.SS Approval and failure handling
+Mutations require root and explicit confirmation. Axon presents resolved changes,
+versions, sizes and flags before committing. HoldPkg protection applies to all
+resolved removals, including cascades and replacements. Protected removals and
+downgrades require additional acknowledgment. Explicit ignored package/group
+targets are rejected. Signature, architecture, dependency, conflict and lock
+checks remain active. There is no \-\-noconfirm option.
+.PP
+Cancellation is cooperative. A running transfer or package operation may finish
+before interruption takes effect. A failed refresh may update some caches;
+a failed commit may leave package changes. Axon does not roll changes back.
+Read-only destinations are checked before commit, but successful preflight
+cannot guarantee subsequent writes will succeed.
+.PP
+Hook, scriptlet and helper errors reported by libalpm cause failure even if
+libalpm reports commit success. Diagnostics include observed completed package
+operations. Those counts do not guarantee all files or scriptlets succeeded.
+Cleanup failures and incomplete diagnostics prevent a success report.
+Never remove a database lock without establishing that no package manager owns it.
+.SH MAINTENANCE
+.TP
+.B \-\-orphans
+List unneeded packages installed as dependencies.
+.TP
+.BI \-\-depends " PACKAGE..."
+Inspect installed dependency relationships.
+.TP
+.BI \-\-asexplicit " PACKAGE..."
+Mark installed packages explicitly installed, after approval.
+.TP
+.BI \-\-asdeps " PACKAGE..."
+Mark installed packages as dependencies, after approval.
+.TP
+.B \-\-clean-cache
+Review cache removals under CleanMethod. Retained package identity is determined
+from package metadata; unrelated cache files are not blindly deleted.
+.TP
+.B \-\-check-db
+Check local/sync records, archive integrity, dependency/conflict consistency,
+and database locks. Malformed and inaccessible records are reported.
+This command does not initialize missing databases or perform repairs.
+.SH TERMINAL BROWSER
+.B \-\-ui
+opens the package browser using the same backend policy and approval interfaces
+as the CLI. The screen lists available keys for browsing, filtering, details,
+installation/removal, upgrades and maintenance. Small terminals show a resize
+message. Failed or declined mutations retain a nonzero final exit status even
+if the user returns to browsing.
+.PP
+Externally supplied terminal control characters, invalid multibyte bytes and
+bidi controls are escaped. Labels are clipped by display columns without
+splitting valid UTF-8 characters. Colors use blue, purple and green.
+A nonempty NO_COLOR disables colors. Redirected streams and TERM=dumb omit
+colors and progress redraws. Progress shows the most recently updated transfer;
+unknown totals leave the bar unfilled. Output failure is reported as failure.
 .SH CONFIGURATION
-Axon reads pacman-style options and repository sections, including
-Include directives, mirror substitutions, and signature policies.
-Relative Include paths are resolved against the process working directory.
+Axon reads pacman-style options and repository sections, Include files,
+$repo/$arch mirror substitutions, Usage and signature policies.
+Relative Includes use the process working directory. List settings append;
+the first scalar path or DownloadUser wins. Signature overrides inherit the
+completed global policy and later tokens override individual settings.
 .PP
-The reader rejects unknown directives, invalid values, duplicate repositories,
-missing includes, include cycles, and configured resource-limit violations.
-It is intentionally stricter than pacman for some malformed configurations.
-Comments must occupy a whole line; an inline hash character is retained.
+Unknown or misplaced directives, invalid values, duplicate repositories,
+missing Includes, Include cycles and resource-limit violations are errors.
+Comments occupy whole lines; inline hash characters are literal. Values are
+not shell commands and receive no quote, environment or tilde expansion.
+This parser is stricter than pacman for some malformed configurations.
 .PP
-XferCommand is parsed but is not supported by backend setup.
-A configuration containing it causes an explicit error, including for queries.
-Frontend settings such as Color are retained but are not implemented by this
-basic interface.
+Backend setup honors cache/hook/GPG/log paths, architectures, IgnorePkg,
+IgnoreGroup, NoUpgrade, NoExtract, UseSyslog, CheckSpace, ParallelDownloads,
+DownloadUser, download timeout/sandbox settings, servers and cache servers.
+HoldPkg and CleanMethod are enforced by the operation and maintenance layers.
+NoProgressBar disables progress bars. VerbosePkgLists and ILoveCandy are parsed
+but do not select alternate layouts. XferCommand is parsed but explicitly
+rejected during backend setup, including for queries.
 .PP
-Query commands do not begin transactions or refresh databases.
-Backend initialization follows libalpm's filesystem behavior and may create
-database directories where permitted.
-.SS Downloads and verification
-The shared backend uses the configured Server order for mirror fallback and
-honors CacheDir, ParallelDownloads, DownloadUser, CheckSpace, and signature
-settings.  DownloadUser must name an existing account; an unknown account is
-an error.  Axon does not silently select another account or disable the sandbox.
-DisableSandbox, DisableSandboxFilesystem, and DisableSandboxSyscalls are
-explicit configuration overrides.
+SigLevel, LocalFileSigLevel and RemoteFileSigLevel control verification using
+GPGDir. Defaults require trusted package and database signatures.
+Verification failures never cause an unsigned retry. DownloadUser must name an
+existing account; Axon does not silently disable its sandbox. DisableSandbox,
+DisableSandboxFilesystem and DisableSandboxSyscalls are explicit overrides.
 .PP
-SigLevel, LocalFileSigLevel, and RemoteFileSigLevel control verification.
-Required signatures must be present and valid under the configured trust policy
-and GPGDir keyring.  Verification failures do not cause an unsigned retry.
-.PP
-The backend refresh-and-upgrade workflow requires a successful repository
-refresh before preparing a full system upgrade for approval.
-A failed refresh can leave some cached databases updated; it does not authorize
-package installation from that partial refresh.
-Cancellation is cooperative: a transfer or package operation already underway
-may finish before interruption takes effect.  Completed changes are not rolled
-back automatically.  Cleanup failures are reported separately from the original
-operation failure, and Axon does not blindly remove an existing database lock.
-.PP
-These backend workflows are not yet exposed as command-line operations.
-The query commands described above continue to use cached data without downloads.
+Ordinary backend initialization may create database directories where permitted.
+File and database inspection requires existing state and does not initialize it.
 .SH PRIVILEGES
-These query operations do not require root, but the configuration and databases
-must be accessible to the invoking user.
+Queries require accessible configuration and databases but not root.
+Refresh, transactions, reason changes and cache removal require root.
 Axon does not request passwords or automatically elevate privileges.
 .PP
-Setuid/setgid-style execution, mismatched real/effective/saved identities,
-and secure-execution launches are rejected.
-Install Axon as a normal executable without setuid/setgid bits or file capabilities.
+Mismatched real/effective/saved user or group IDs and secure-execution launches
+are rejected. Install Axon without setuid/setgid bits or file capabilities.
+An administrator's launcher must start an ordinary root process for mutations.
 .SH EXIT STATUS
 .TP
 .B 0
-The operation completed successfully, including a search with no matches.
+Success, including a search with no matches.
 .TP
 .B 1
-A configuration, privilege, backend, or output error occurred, or a requested
-installed package was not found.
+Configuration, privilege, backend, transaction, inspection or output failure;
+a missing requested package; or a declined/cancelled mutation.
 .TP
 .B 2
-An option, operation combination, or required argument was invalid.
+Invalid options, combinations or required arguments.
 .SH FILES
 .TP
 .I /etc/pacman.conf
-Default configuration file.
+Default configuration.
 .TP
 .I /var/lib/pacman/local/
 Default installed-package database.
@@ -150,37 +275,30 @@ Default installed-package database.
 .I /var/lib/pacman/sync/
 Default cached repository databases.
 .PP
-RootDir and DBPath configuration can change the database locations.
+RootDir changes default DBPath/LogFile. Explicit DBPath remains independent
+of RootDir; configure both for an alternate root.
 .SH EXAMPLES
-List installed packages:
-.PP
 .nf
-    axon \-Q
+axon \-Q
+axon \-Qi pacman glibc
+axon \-Qs '^pacman$'
+axon \-Ss '^pacman$'
+axon \-Qo /usr/bin/pacman
+axon \-Qkk \-\-checksums pacman
+axon \-\-check-db
+axon \-\-config /path/to/pacman.conf \-Q
+sudo axon \-Syu
+sudo axon \-S \-\-needed package
+sudo axon \-U ./package.pkg.tar.zst
+sudo axon \-Rs package
+axon \-\-ui
 .fi
-.PP
-Inspect two installed packages:
-.PP
-.nf
-    axon \-Qi pacman glibc
-.fi
-.PP
-Use the equivalent long options:
-.PP
-.nf
-    axon \-\-query \-\-info pacman
-.fi
-.PP
-Search cached repositories, quoting the pattern to prevent shell expansion:
-.PP
-.nf
-    axon \-Ss '^pacman$'
-.fi
-.PP
-Use an alternate configuration:
-.PP
-.nf
-    axon \-\-config /path/to/pacman.conf \-Q
-.fi
+.SH LIMITATIONS
+Axon implements a subset of pacman's interface, not every option or identical
+detail output. Inspection and failure handling do not provide transactional
+rollback or automatic boot recovery. Disposable NeurOS installation, full-upgrade
+and reboot-recovery validation is required before adopting Axon as the default
+system package manager.
 .SH SEE ALSO
 .BR pacman (8),
 .BR pacman.conf (5),
