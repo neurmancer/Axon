@@ -14,9 +14,20 @@ struct axon_operation {
     int question;
     int ignored;
     int prepared;
+    int busy;
+    int committing;
+    int transaction_started;
+    int cancelled;
+    int interrupting;
+    int interrupted;
+    axon_operation_callbacks_t callbacks;
+    axon_operation_result_t *cleanup_result;
     alpm_errno_t plan_error;
 };
 
+int axon_operation_poll(axon_operation_t *operation);
+alpm_errno_t axon_operation_set_callbacks(axon_operation_t *operation);
+void axon_operation_question(void *context, alpm_question_t *question);
 axon_operation_status_t axon_operation_build_plan(axon_operation_t *operation);
 void axon_operation_clear_plan(axon_operation_t *operation);
 int axon_operation_held(const axon_operation_t *operation, const char *name);

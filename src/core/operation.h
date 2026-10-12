@@ -5,6 +5,7 @@
 #include "privilege.h"
 
 #include <stdint.h>
+#include <signal.h>
 
 typedef struct axon_operation axon_operation_t;
 
@@ -26,6 +27,7 @@ typedef enum {
     AXON_OPERATION_APPROVAL,
     AXON_OPERATION_STATE,
     AXON_OPERATION_QUESTION,
+    AXON_OPERATION_CANCELLED,
     AXON_OPERATION_OVERFLOW
 } axon_operation_status_t;
 
@@ -34,6 +36,24 @@ typedef struct {
     const char *repository;
 } axon_operation_target_t;
 
+typedef enum {
+    AXON_DECISION_UNANSWERED,
+    AXON_DECISION_ACCEPT,
+    AXON_DECISION_DECLINE,
+    AXON_DECISION_CANCEL
+} axon_decision_t;
+
+typedef struct {
+    alpm_cb_log log;
+    alpm_cb_event event;
+    alpm_cb_progress progress;
+    alpm_cb_download download;
+    axon_decision_t (*question)(void *context, const alpm_question_t *question,
+                               size_t *provider_index);
+    void *context;
+    const volatile sig_atomic_t *cancel_requested;
+} axon_operation_callbacks_t;
+
 typedef struct {
     axon_operation_kind_t kind;
     const axon_operation_target_t *targets;
@@ -41,6 +61,7 @@ typedef struct {
     int flags;
     int allow_downgrade;
     int allow_replacements;
+    axon_operation_callbacks_t callbacks;
 } axon_operation_request_t;
 
 typedef enum {
@@ -99,10 +120,14 @@ typedef struct {
     int committed;
     int may_have_changes;
     int refreshed;
+    int cancelled;
 } axon_operation_result_t;
 
 axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
     const axon_operation_request_t *request, axon_operation_t **operation,
+    axon_operation_result_t *result);
+axon_operation_status_t axon_operation_prepare_upgrade(const axon_config_t *config,
+    int force, const axon_operation_request_t *request, axon_operation_t **operation,
     axon_operation_result_t *result);
 const axon_operation_plan_t *axon_operation_plan(const axon_operation_t *operation);
 axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
@@ -113,6 +138,8 @@ axon_operation_status_t axon_operation_free(axon_operation_t **operation,
     axon_operation_result_t *result);
 axon_operation_status_t axon_operation_refresh(const axon_config_t *config,
     int force, axon_operation_result_t *result);
+axon_operation_status_t axon_operation_refresh_with_callbacks(const axon_config_t *config,
+    int force, const axon_operation_callbacks_t *callbacks, axon_operation_result_t *result);
 void axon_operation_result_clear(axon_operation_result_t *result);
 
 #endif

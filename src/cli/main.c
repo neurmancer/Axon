@@ -3,6 +3,10 @@
 #include "alpm_extra.h"
 #include "pacman_config.h"
 #include "privilege.h"
+#include "mutation.h"
+#include "maintenance.h"
+#include "../ui/terminal.h"
+#include "../ui/theme.h"
 
 #include <getopt.h>
 #include <inttypes.h>
@@ -14,13 +18,29 @@ static void usage(FILE *output)
     fputs("Usage: axon [--config PATH] -Q\n"
           "       axon [--config PATH] -Qi PACKAGE...\n"
           "       axon [--config PATH] -Ss PATTERN...\n"
+          "       axon [--config PATH] -S PACKAGE...\n"
+          "       axon [--config PATH] -U ARCHIVE...\n"
+          "       axon [--config PATH] -R PACKAGE...\n"
+          "       axon [--config PATH] -Sy | -Su | -Syu\n"
           "       axon --help\n\n"
           "  -Q, --query    List installed packages\n"
           "  -i, --info     Show installed-package details with -Q\n"
-          "  -S, --sync     Select repository queries (requires -s)\n"
+          "  -S, --sync     Select repository packages or queries\n"
           "  -s, --search   Search cached repositories with -S (regular expressions)\n"
           "  --config PATH Use PATH instead of /etc/pacman.conf\n"
-          "No repository refreshes or package changes are performed.\n", output);
+          "  -U, --upgrade Install local package archives\n"
+          "  -R, --remove  Remove installed packages\n"
+          "  -y, --refresh Refresh repositories with -S (twice forces refresh)\n"
+          "  -u, --sysupgrade Full system upgrade with -S\n"
+          "  --allow-downgrade Permit a downgrade plan (confirmation still required)\n"
+          "  --orphans       List unneeded dependency packages\n"
+          "  --depends PKG... Inspect installed dependencies\n"
+          "  --asexplicit PKG... Mark packages explicitly installed\n"
+          "  --asdeps PKG... Mark packages installed as dependencies\n"
+          "  --clean-cache   Review cache removal using CleanMethod\n"
+          "  --check-db      Inspect database and recovery diagnostics\n"
+          "  --ui            Open the interactive package browser\n"
+          "Mutations require root and explicit confirmation.\n", output);
 }
 
 static const char *value(const char *text)
@@ -39,7 +59,8 @@ static int installed(axon_alpm_t *core)
 
     for(const alpm_list_t *item = packages; item; item = item->next) {
         alpm_pkg_t *package = item->data;
-        printf("%s %s\n", alpm_pkg_get_name(package), alpm_pkg_get_version(package));
+        printf("%s%s %s%s\n", axon_color(stdout, AXON_BLUE), alpm_pkg_get_name(package),
+               alpm_pkg_get_version(package), axon_color(stdout, AXON_RESET));
     }
     return(0);
 }
@@ -56,6 +77,7 @@ static int information(axon_alpm_t *core, int count, char **names)
             continue;
         }
 
+        fputs(axon_color(stdout, AXON_BLUE), stdout);
         printf("Name           : %s\n"
                "Version        : %s\n"
                "Description    : %s\n"
@@ -68,6 +90,7 @@ static int information(axon_alpm_t *core, int count, char **names)
                value(alpm_pkg_get_url(package)), (intmax_t)alpm_pkg_get_isize(package),
                alpm_pkg_get_reason(package) == ALPM_PKG_REASON_EXPLICIT
                    ? "Explicitly installed" : "Installed as a dependency");
+        fputs(axon_color(stdout, AXON_RESET), stdout);
     }
     return(result);
 }
@@ -95,9 +118,10 @@ static int search(axon_alpm_t *core, int count, char **terms)
 
     for(alpm_list_t *item = packages; item; item = item->next) {
         alpm_pkg_t *package = item->data;
-        printf("%s/%s %s\n    %s\n", alpm_db_get_name(alpm_pkg_get_db(package)),
+        printf("%s%s/%s %s%s\n    %s%s%s\n", axon_color(stdout, AXON_PURPLE), alpm_db_get_name(alpm_pkg_get_db(package)),
                alpm_pkg_get_name(package), alpm_pkg_get_version(package),
-               value(alpm_pkg_get_desc(package)));
+               axon_color(stdout, AXON_RESET), axon_color(stdout, AXON_BLUE),
+               value(alpm_pkg_get_desc(package)), axon_color(stdout, AXON_RESET));
     }
     
     alpm_list_free(packages);
@@ -121,6 +145,8 @@ int main(int argc, char **argv)
     int info = 0;
     int searching = 0;
     int help = 0;
+    int remove = 0, local = 0, refresh = 0, upgrade = 0, downgrade = 0;
+    int maintenance = 0;
     int option;
     
     static const struct option options[] = {
@@ -129,13 +155,25 @@ int main(int argc, char **argv)
         {"sync", no_argument, NULL, 'S'},
         {"info", no_argument, NULL, 'i'},
         {"search", no_argument, NULL, 's'},
+        {"remove", no_argument, NULL, 'R'},
+        {"upgrade", no_argument, NULL, 'U'},
+        {"refresh", no_argument, NULL, 'y'},
+        {"sysupgrade", no_argument, NULL, 'u'},
+        {"allow-downgrade", no_argument, NULL, 257},
+        {"orphans", no_argument, NULL, AXON_ORPHANS},
+        {"depends", no_argument, NULL, AXON_DEPENDENCIES},
+        {"asexplicit", no_argument, NULL, AXON_REASON_EXPLICIT},
+        {"asdeps", no_argument, NULL, AXON_REASON_DEPENDENCY},
+        {"clean-cache", no_argument, NULL, AXON_CLEAN_CACHE},
+        {"check-db", no_argument, NULL, AXON_CHECK_DATABASE},
+        {"ui", no_argument, NULL, AXON_UI},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
 
     opterr = 0;
     
-    while((option = getopt_long(argc, argv, "QSish", options, NULL)) != -1) {
+    while((option = getopt_long(argc, argv, "QSishRUyu", options, NULL)) != -1) {
         switch(option) {
             case 256:
                 path = optarg;
@@ -151,6 +189,24 @@ int main(int argc, char **argv)
                 break;
             case 's':
                 searching = 1;
+                break;
+            case 'R': remove = 1; break;
+            case 'U': local = 1; break;
+            case 'y': refresh++; break;
+            case 'u': upgrade++; break;
+            case 257: downgrade = 1; break;
+            case AXON_ORPHANS:
+            case AXON_DEPENDENCIES:
+            case AXON_REASON_EXPLICIT:
+            case AXON_REASON_DEPENDENCY:
+            case AXON_CLEAN_CACHE:
+            case AXON_CHECK_DATABASE:
+            case AXON_UI:
+                if(maintenance && maintenance != option) {
+                    fputs("axon: choose one maintenance operation\n", stderr);
+                    return(2);
+                }
+                maintenance = option;
                 break;
             case 'h':
                 help = 1;
@@ -169,11 +225,33 @@ int main(int argc, char **argv)
 
     int count = argc - optind;
     
-    if(path[0] == '\0' || query == sync || (query && searching) || (sync && (info || !searching))
-            || ((info || searching) && count == 0) || (query && !info && count != 0)) {
-        fputs("axon: choose -Q, -Qi PACKAGE..., or -Ss PATTERN...\n", stderr);
+    int mutation = remove || local || (sync && !searching);
+    if(maintenance) {
+        int targets = maintenance == AXON_DEPENDENCIES || maintenance == AXON_REASON_EXPLICIT
+            || maintenance == AXON_REASON_DEPENDENCY;
+        if(query || sync || remove || local || info || searching || refresh || upgrade || downgrade
+                || path[0] == '\0' || (targets ? count == 0 : count != 0)) {
+            fputs("axon: maintenance operations cannot be combined; --depends, --asexplicit and --asdeps require package names\n", stderr);
+            return(2);
+        }
+        mutation = maintenance == AXON_REASON_EXPLICIT || maintenance == AXON_REASON_DEPENDENCY
+            || maintenance == AXON_CLEAN_CACHE;
+    }
+
+    else if(path[0] == '\0' || query + sync + remove + local != 1
+            || (info && !query) || (searching && !sync)
+            || ((refresh || upgrade) && (!sync || searching)) || refresh > 2 || upgrade > 1
+            || (query && ((info && !count) || (!info && count)))
+            || (searching && !count) || ((remove || local) && !count)
+            || (sync && !searching && ((refresh || upgrade) ? count != 0 : count == 0))
+            || (downgrade && (!mutation || remove || (refresh && !upgrade)))) {
+        fputs("axon: choose -Q, -Qi, -Ss, -S PACKAGE..., -U ARCHIVE..., -R PACKAGE..., -Sy, -Su, or -Syu\n", stderr);
         usage(stderr);
         return(2);
+    }
+    if(mutation && (identity = axon_privilege_check(1)) != AXON_PRIVILEGE_OK) {
+        fprintf(stderr, "axon: %s\n", axon_privilege_message(identity));
+        return(1);
     }
 
     axon_config_t *config = NULL;
@@ -182,8 +260,24 @@ int main(int argc, char **argv)
     
     int result = 1;
     
-    if(axon_config_load(path, &config, &error) != AXON_CONFIG_OK
-            || axon_config_open(config, &core, &error) != AXON_CONFIG_OK) {
+    if(axon_config_load(path, &config, &error) != AXON_CONFIG_OK) {
+        fprintf(stderr, "axon: %s:%zu: %s\n", error.file, error.line, error.message);
+        goto cleanup;
+    }
+
+    if(maintenance) {
+        result = maintenance == AXON_UI ? axon_terminal(config)
+            : axon_cli_maintenance(config, maintenance, count, argv + optind);
+        goto cleanup;
+    }
+    if(mutation) {
+        axon_operation_kind_t kind = remove ? AXON_OPERATION_REMOVE : local ? AXON_OPERATION_FILE
+            : upgrade ? AXON_OPERATION_UPGRADE : AXON_OPERATION_INSTALL;
+        result = axon_cli_mutate(config, kind, count, argv + optind, refresh,
+                                 refresh && !upgrade, downgrade);
+        goto cleanup;
+    }
+    if(axon_config_open(config, &core, &error) != AXON_CONFIG_OK) {
         fprintf(stderr, "axon: %s:%zu: %s\n", error.file, error.line, error.message);
         goto cleanup;
     }

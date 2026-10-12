@@ -100,6 +100,9 @@ alpm_errno_t axon_alpm_option(axon_alpm_t *core, axon_alpm_option_t option,
             break;
         case AXON_ALPM_SANDBOX_USER:
             result = alpm_option_set_sandboxuser(core->handle, value);
+            if(result > 0) {
+                return(ALPM_ERR_WRONG_ARGS);
+            }
             break;
         default:
             return(ALPM_ERR_WRONG_ARGS);

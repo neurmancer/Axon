@@ -97,6 +97,29 @@ basic interface.
 Query commands do not begin transactions or refresh databases.
 Backend initialization follows libalpm's filesystem behavior and may create
 database directories where permitted.
+.SS Downloads and verification
+The shared backend uses the configured Server order for mirror fallback and
+honors CacheDir, ParallelDownloads, DownloadUser, CheckSpace, and signature
+settings.  DownloadUser must name an existing account; an unknown account is
+an error.  Axon does not silently select another account or disable the sandbox.
+DisableSandbox, DisableSandboxFilesystem, and DisableSandboxSyscalls are
+explicit configuration overrides.
+.PP
+SigLevel, LocalFileSigLevel, and RemoteFileSigLevel control verification.
+Required signatures must be present and valid under the configured trust policy
+and GPGDir keyring.  Verification failures do not cause an unsigned retry.
+.PP
+The backend refresh-and-upgrade workflow requires a successful repository
+refresh before preparing a full system upgrade for approval.
+A failed refresh can leave some cached databases updated; it does not authorize
+package installation from that partial refresh.
+Cancellation is cooperative: a transfer or package operation already underway
+may finish before interruption takes effect.  Completed changes are not rolled
+back automatically.  Cleanup failures are reported separately from the original
+operation failure, and Axon does not blindly remove an existing database lock.
+.PP
+These backend workflows are not yet exposed as command-line operations.
+The query commands described above continue to use cached data without downloads.
 .SH PRIVILEGES
 These query operations do not require root, but the configuration and databases
 must be accessible to the invoking user.

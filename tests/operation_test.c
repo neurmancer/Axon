@@ -1,6 +1,6 @@
 #define _XOPEN_SOURCE 700
 
-#include "operation.h"
+#include "operation_internal.h"
 #include "alpm_extra.h"
 
 #include <archive.h>
@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int authorized = 1;
@@ -33,6 +34,124 @@ axon_privilege_result_t __wrap_axon_privilege_check(int require_root)
         abort(); \
     } \
 } while(0)
+
+static int fail_cleanup;
+alpm_errno_t __real_axon_alpm_transaction_release(axon_alpm_t *core);
+alpm_errno_t __wrap_axon_alpm_transaction_release(axon_alpm_t *core)
+{
+    alpm_errno_t error = __real_axon_alpm_transaction_release(core);
+    if(fail_cleanup && error == ALPM_ERR_OK) {
+        fail_cleanup = 0;
+        return(ALPM_ERR_SYSTEM);
+    }
+    return(error);
+}
+
+static volatile sig_atomic_t stop;
+static void stop_signal(int number)
+{
+    (void)number;
+    stop = 1;
+}
+
+struct observer {
+    axon_decision_t answer;
+    size_t provider;
+    int questions, events, progress, logs, downloads;
+    alpm_event_type_t cancel_event;
+    int cancel_download;
+    axon_operation_t **operation;
+};
+
+static axon_decision_t decide(void *context, const alpm_question_t *question, size_t *provider)
+{
+    struct observer *observer = context;
+    assert(question != NULL);
+    observer->questions++;
+    *provider = observer->provider;
+    return(observer->answer);
+}
+
+static void observe_event(void *context, alpm_event_t *event)
+{
+    struct observer *observer = context;
+    observer->events++;
+    if(observer->operation != NULL && *observer->operation != NULL) {
+        assert(axon_operation_free(observer->operation, &result) == AXON_OPERATION_STATE);
+        assert(axon_operation_cancel(*observer->operation, &result) == AXON_OPERATION_STATE);
+        assert(axon_operation_commit(*observer->operation, NULL, &result) == AXON_OPERATION_STATE);
+    }
+    if(event->type == observer->cancel_event) {
+        assert(raise(SIGUSR1) == 0);
+    }
+}
+
+static void observe_progress(void *context, alpm_progress_t progress, const char *package,
+                             int percent, size_t count, size_t current)
+{
+    struct observer *observer = context;
+    (void)progress;
+    (void)package;
+    (void)percent;
+    (void)count;
+    (void)current;
+    observer->progress++;
+}
+
+static void observe_log(void *context, alpm_loglevel_t level, const char *format, va_list args)
+{
+    struct observer *observer = context;
+    (void)level;
+    char message[256];
+    assert(vsnprintf(message, sizeof(message), format, args) >= 0);
+    observer->logs++;
+}
+
+static void observe_download(void *context, const char *name, alpm_download_event_type_t type, void *data)
+{
+    struct observer *observer = context;
+    (void)type;
+    (void)data;
+    assert(name != NULL);
+    observer->downloads++;
+    if(observer->cancel_download) {
+        stop = 1;
+    }
+}
+
+static void decisions(void)
+{
+    struct observer observer = {0};
+    axon_operation_t operation = {.callbacks = {.question = decide, .context = &observer}};
+    const alpm_question_type_t types[] = {ALPM_QUESTION_INSTALL_IGNOREPKG,
+        ALPM_QUESTION_REPLACE_PKG, ALPM_QUESTION_CONFLICT_PKG, ALPM_QUESTION_CORRUPTED_PKG,
+        ALPM_QUESTION_REMOVE_PKGS, ALPM_QUESTION_IMPORT_KEY};
+    for(size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        for(int answer = AXON_DECISION_UNANSWERED; answer <= AXON_DECISION_CANCEL; answer++) {
+            operation.question = operation.cancelled = 0;
+            observer.answer = answer;
+            alpm_question_t question = {.type = types[i]};
+            axon_operation_question(&operation, &question);
+            assert(question.any.answer == (answer == AXON_DECISION_ACCEPT));
+            assert(!!operation.question == (answer == AXON_DECISION_UNANSWERED));
+            assert(operation.cancelled == (answer == AXON_DECISION_CANCEL));
+        }
+    }
+    alpm_list_t *providers = NULL;
+    assert(alpm_list_append(&providers, &observer) != NULL);
+    assert(alpm_list_append(&providers, &operation) != NULL);
+    for(size_t index = 0; index < 4; index++) {
+        operation.question = operation.cancelled = 0;
+        observer.answer = AXON_DECISION_ACCEPT;
+        observer.provider = index == 3 ? SIZE_MAX : index;
+        alpm_question_t question = {.select_provider = {.type = ALPM_QUESTION_SELECT_PROVIDER,
+                                                       .providers = providers}};
+        axon_operation_question(&operation, &question);
+        assert(question.select_provider.use_index == (index < 2 ? (int)index : -1));
+        assert(!!operation.question == (index >= 2));
+    }
+    alpm_list_free(providers);
+}
 
 struct package {
     const char *name;
@@ -171,6 +290,10 @@ static int remove_entry(const char *path, const struct stat *info, int type, str
 
 int main(void)
 {
+    decisions();
+    struct sigaction action = {.sa_handler = stop_signal};
+    sigemptyset(&action.sa_mask);
+    assert(sigaction(SIGUSR1, &action, NULL) == 0);
     char *previous = getcwd(NULL, 0);
     char temporary[] = "/tmp/axon-operation-XXXXXX";
     assert(previous != NULL && mkdtemp(temporary) != NULL && chdir(temporary) == 0);
@@ -185,7 +308,9 @@ int main(void)
         {.name = "versioned", .version = "2-1", .size = 9},
         {.name = "versioned", .version = "1-1", .size = 8},
         {.name = "badarch", .version = "1-1", .size = 1, .architecture = "wrong"},
-        {.name = "collision", .version = "1-1", .size = 12}
+        {.name = "collision", .version = "1-1", .size = 12},
+        {.name = "cancel-first", .version = "1-1", .size = 1},
+        {.name = "cancel-second", .version = "1-1", .size = 1}
     };
     struct package packages[] = {
         {.name = "essential", .version = "2-1", .size = 12, .dependency = "helper>=1"},
@@ -319,6 +444,23 @@ int main(void)
 
     request = (axon_operation_request_t){.kind = AXON_OPERATION_UPGRADE, .flags = safe_flags};
     EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_QUESTION);
+    {
+        struct observer replacement = {.answer = AXON_DECISION_DECLINE};
+        request.callbacks = (axon_operation_callbacks_t){.question = decide, .context = &replacement};
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+        assert(replacement.questions && entry(axon_operation_plan(operation), "legacy") == NULL);
+        release(&operation);
+        replacement.answer = AXON_DECISION_UNANSWERED;
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_QUESTION);
+        replacement.answer = AXON_DECISION_CANCEL;
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_CANCELLED);
+        assert(result.cancelled && operation == NULL);
+        replacement.answer = AXON_DECISION_ACCEPT;
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+        assert(entry(axon_operation_plan(operation), "legacy") != NULL);
+        release(&operation);
+        request.callbacks = (axon_operation_callbacks_t){0};
+    }
     request.allow_replacements = 1;
     EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
     plan = axon_operation_plan(operation);
@@ -385,6 +527,122 @@ int main(void)
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_BACKEND);
     assert(result.backend_error == ALPM_ERR_FILE_CONFLICTS && !result.committed && result.may_have_changes);
     assert(result.diagnostics != NULL && access("db/db.lck", F_OK) != 0);
+    release(&operation);
+
+    struct observer observer = {.answer = AXON_DECISION_ACCEPT, .operation = &operation};
+    axon_operation_callbacks_t callbacks = {.question = decide, .event = observe_event,
+        .progress = observe_progress, .log = observe_log, .download = observe_download,
+        .context = &observer, .cancel_requested = &stop};
+    targets[0] = (axon_operation_target_t){.name = "ignored"};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_INSTALL, .targets = targets,
+        .target_count = 1, .flags = safe_flags, .callbacks = callbacks};
+    observer.answer = AXON_DECISION_DECLINE;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_POLICY);
+    observer.answer = AXON_DECISION_UNANSWERED;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_POLICY);
+    observer.answer = AXON_DECISION_ACCEPT;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(observer.questions == 3 && observer.events && observer.logs);
+    approved = approval(operation);
+    observer.cancel_download = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_CANCELLED);
+    assert(result.cancelled && !result.committed && observer.downloads);
+    release(&operation);
+    stop = observer.cancel_download = 0;
+    axon_alpm_t *check = NULL;
+    alpm_pkg_t *package = NULL;
+    assert(axon_config_open(config, &check, &config_error) == AXON_CONFIG_OK);
+    assert(axon_alpm_local_package(check, "ignored", &package) == ALPM_ERR_PKG_NOT_FOUND);
+    assert(axon_alpm_release(&check) == 0);
+
+    observer.cancel_download = 1;
+    EXPECT(axon_operation_refresh_with_callbacks(config, 1, &callbacks, &result), AXON_OPERATION_CANCELLED);
+    assert(result.cancelled && result.may_have_changes);
+    stop = observer.cancel_download = 0;
+
+    targets[0] = (axon_operation_target_t){.name = locals[7].path};
+    targets[1] = (axon_operation_target_t){.name = locals[8].path};
+    request.kind = AXON_OPERATION_FILE;
+    request.target_count = 2;
+    stop = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_CANCELLED);
+    assert(!result.may_have_changes && operation == NULL);
+    EXPECT(axon_operation_refresh_with_callbacks(config, 1, &callbacks, &result), AXON_OPERATION_CANCELLED);
+    assert(!result.may_have_changes);
+    stop = 0;
+    observer.cancel_event = ALPM_EVENT_RESOLVEDEPS_START;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_CANCELLED);
+    assert(operation == NULL && result.cancelled && access("db/db.lck", F_OK) != 0);
+    stop = 0;
+    observer.cancel_event = 0;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    approved = approval(operation);
+    stop = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_CANCELLED);
+    assert(!result.may_have_changes);
+    release(&operation);
+    stop = 0;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    approved = approval(operation);
+    observer.cancel_event = ALPM_EVENT_PACKAGE_OPERATION_DONE;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_CANCELLED);
+    assert(result.cancelled && result.may_have_changes && !result.committed && observer.progress);
+    release(&operation);
+    stop = 0;
+    observer.cancel_event = 0;
+    installed(config, "cancel-first", "1-1", ALPM_PKG_REASON_EXPLICIT);
+    assert(axon_config_open(config, &check, &config_error) == AXON_CONFIG_OK);
+    assert(axon_alpm_local_package(check, "cancel-second", &package) == ALPM_ERR_PKG_NOT_FOUND);
+    assert(axon_alpm_release(&check) == 0);
+
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    pid_t child = fork();
+    assert(child >= 0);
+    if(child == 0) {
+        axon_operation_t *competitor = NULL;
+        axon_operation_result_t competing = {0};
+        assert(axon_operation_prepare(config, &request, &competitor, &competing) == AXON_OPERATION_BACKEND);
+        assert(competing.backend_error == ALPM_ERR_HANDLE_LOCK && competitor == NULL);
+        assert(access("db/db.lck", F_OK) == 0);
+        axon_operation_result_clear(&competing);
+        _exit(0);
+    }
+    int child_status;
+    assert(waitpid(child, &child_status, 0) == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    assert(access("db/db.lck", F_OK) == 0);
+    fail_cleanup = 1;
+    EXPECT(axon_operation_cancel(operation, &result), AXON_OPERATION_BACKEND);
+    assert(result.cleanup_error == ALPM_ERR_SYSTEM && result.backend_error == ALPM_ERR_OK);
+    release(&operation);
+
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(unlink("db/db.lck") == 0 && mkdir("db/db.lck", 0700) == 0);
+    EXPECT(axon_operation_cancel(operation, &result), AXON_OPERATION_BACKEND);
+    assert(result.cleanup_error == ALPM_ERR_SYSTEM && result.diagnostics != NULL);
+    assert(access("db/db.lck", F_OK) == 0);
+    assert(rmdir("db/db.lck") == 0);
+    release(&operation);
+    if(getuid() != 0) {
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+        assert(chmod("db", 0500) == 0);
+        EXPECT(axon_operation_cancel(operation, &result), AXON_OPERATION_BACKEND);
+        assert(result.cleanup_error == ALPM_ERR_SYSTEM && access("db/db.lck", F_OK) == 0);
+        assert(chmod("db", 0700) == 0 && unlink("db/db.lck") == 0);
+        release(&operation);
+    }
+
+    targets[0].name = locals[5].path;
+    request.target_count = 1;
+    fail_cleanup = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_BACKEND);
+    assert(result.backend_error == ALPM_ERR_PKG_INVALID_ARCH && result.cleanup_error == ALPM_ERR_SYSTEM);
+    assert(operation == NULL && access("db/db.lck", F_OK) != 0);
+    targets[0].name = locals[6].path;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    approved = approval(operation);
+    fail_cleanup = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_BACKEND);
+    assert(result.backend_error == ALPM_ERR_FILE_CONFLICTS && result.cleanup_error == ALPM_ERR_SYSTEM);
     release(&operation);
 
     targets[0] = (axon_operation_target_t){.name = "essential"};

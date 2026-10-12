@@ -1,0 +1,83 @@
+name: Axon regression
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    container:
+      image: archlinux:base-devel
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install build and fixture dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel pacman libarchive ncurses gnupg python clang git zstd util-linux
+          useradd --create-home axonci
+          chown -R axonci:axonci "$GITHUB_WORKSPACE"
+      - name: Strict build and complete regression suite
+        env:
+          AXON_COMPILER: ${{ matrix.compiler }}
+        run: |
+          set -o pipefail
+          runuser -u axonci -- make clean
+          runuser -u axonci -- make regression CC="$AXON_COMPILER" CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g' 2>&1 | tee regression.log
+      - name: Preserve results and packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-${{ matrix.compiler }}
+          path: |
+            regression.log
+            build/*.pkg.tar.zst
+            build/*.src.tar.zst
+          if-no-files-found: warn
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel pacman libarchive ncurses gnupg python clang util-linux
+          useradd --create-home axonci
+          chown -R axonci:axonci "$GITHUB_WORKSPACE"
+      - name: Address, undefined-behavior, and leak regressions
+        run: |
+          set -o pipefail
+          runuser -u axonci -- make sanitize 2>&1 | tee sanitizers.log
+      - name: Preserve sanitizer output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizers
+          path: sanitizers.log

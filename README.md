@@ -4,6 +4,8 @@
 >
 > _Lowkey...nothing works just yet broo...just wait a little more_
 > and this is just a side-quest so...no comments in the source at least not the funny ones
+> Once everything will work I'll add some cyberpunk flavor lol...
+
 
 ## Contents
 

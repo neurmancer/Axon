@@ -30,7 +30,9 @@ static void diagnostic(axon_operation_result_t *result, const char *format, ...)
     va_end(copy);
     if(text == NULL || alpm_list_append(&result->diagnostics, text) == NULL) {
         free(text);
-        result->status = AXON_OPERATION_MEMORY;
+        if(result->status == AXON_OPERATION_OK) {
+            result->status = AXON_OPERATION_MEMORY;
+        }
     }
 }
 
@@ -89,35 +91,21 @@ static int authorized(axon_operation_result_t *result)
     return(1);
 }
 
-static void question(void *context, alpm_question_t *question)
+static void cancellation(axon_operation_t *operation, axon_operation_result_t *result)
 {
-    axon_operation_t *operation = context;
-    question->any.answer = 0;
-    switch(question->type) {
-        case ALPM_QUESTION_REPLACE_PKG:
-            if(operation->allow_replacements) {
-                question->replace.replace = 1;
-                return;
-            }
-            break;
-        case ALPM_QUESTION_INSTALL_IGNOREPKG:
-            operation->ignored = 1;
-            break;
-        case ALPM_QUESTION_SELECT_PROVIDER:
-            if(alpm_list_count(question->select_provider.providers) == 1) {
-                question->select_provider.use_index = 0;
-                return;
-            }
-            question->select_provider.use_index = -1;
-            break;
-        default:
-            break;
+    if(axon_operation_poll(operation) && operation->cancelled) {
+        result->cancelled = 1;
+        result->committed = 0;
+        if(result->status == AXON_OPERATION_OK) {
+            result->status = AXON_OPERATION_CANCELLED;
+        }
     }
-    operation->question = question->type;
 }
 
 static void finish(axon_operation_t *operation, axon_operation_result_t *result)
 {
+    operation->busy = 1;
+    operation->cleanup_result = result;
     if(operation->core != NULL) {
         alpm_errno_t error = axon_alpm_transaction_release(operation->core);
         if(error != ALPM_ERR_OK) {
@@ -127,7 +115,9 @@ static void finish(axon_operation_t *operation, axon_operation_result_t *result)
             result->cleanup_error = ALPM_ERR_SYSTEM;
         }
     }
+    operation->cleanup_result = NULL;
     operation->prepared = 0;
+    operation->busy = 0;
     if(result->cleanup_error != ALPM_ERR_OK) {
         if(result->status == AXON_OPERATION_OK) {
             result->status = AXON_OPERATION_BACKEND;
@@ -229,14 +219,19 @@ static alpm_errno_t queue(axon_operation_t *operation, axon_operation_kind_t kin
         return(error);
     }
     if(alpm_pkg_should_ignore(alpm_pkg_get_handle(package), package)) {
-        error = ALPM_ERR_PKG_IGNORED;
+        alpm_question_t value = {.install_ignorepkg = {
+            .type = ALPM_QUESTION_INSTALL_IGNOREPKG, .pkg = package}};
+        axon_operation_question(operation, &value);
+        if(!value.install_ignorepkg.install) {
+            error = ALPM_ERR_PKG_IGNORED;
+        }
     }
 
-    else if(alpm_list_append_strdup(&operation->explicit_names, alpm_pkg_get_name(package)) == NULL) {
+    if(error == ALPM_ERR_OK && alpm_list_append_strdup(&operation->explicit_names, alpm_pkg_get_name(package)) == NULL) {
         error = ALPM_ERR_MEMORY;
     }
 
-    else {
+    else if(error == ALPM_ERR_OK) {
         error = axon_alpm_transaction_package(operation->core, package);
     }
     if(error != ALPM_ERR_OK && kind == AXON_OPERATION_FILE) {
@@ -265,6 +260,12 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         result->status = AXON_OPERATION_MEMORY;
         return(result->status);
     }
+    created->callbacks = request->callbacks;
+    created->busy = 1;
+    cancellation(created, result);
+    if(result->cancelled) {
+        goto fail;
+    }
     created->allow_downgrade = request->allow_downgrade;
     created->allow_replacements = request->allow_replacements;
     created->plan.flags = request->flags;
@@ -279,8 +280,7 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         result->status = AXON_OPERATION_CONFIG;
         goto fail;
     }
-    axon_alpm_callbacks_t callbacks = {.question = question, .context = created};
-    alpm_errno_t error = axon_alpm_callbacks(created->core, &callbacks);
+    alpm_errno_t error = axon_operation_set_callbacks(created);
     if(error == ALPM_ERR_OK) {
         error = axon_alpm_transaction_begin(created->core, request->flags);
     }
@@ -310,6 +310,9 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
 
     else {
         for(size_t index = 0; index < request->target_count; index++) {
+            if(axon_operation_poll(created)) {
+                break;
+            }
             error = queue(created, request->kind, &request->targets[index]);
             if(error != ALPM_ERR_OK) {
                 diagnostic(result, "target: %s", request->targets[index].name);
@@ -318,7 +321,7 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         }
     }
     axon_alpm_problem_t problem = {0};
-    if(error == ALPM_ERR_OK && !created->question) {
+    if(error == ALPM_ERR_OK && !axon_operation_poll(created)) {
         error = axon_alpm_transaction_prepare(created->core, &problem);
     }
     if(created->question) {
@@ -334,6 +337,7 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         }
     }
     axon_alpm_problem_clear(&problem);
+    cancellation(created, result);
     if(result->status != AXON_OPERATION_OK) {
         goto fail;
     }
@@ -349,10 +353,12 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         goto fail;
     }
     created->prepared = 1;
+    created->busy = 0;
     *operation = created;
     return(AXON_OPERATION_OK);
 
 fail:
+    cancellation(created, result);
     finish(created, result);
     destroy(created);
     return(result->status);
@@ -376,12 +382,20 @@ static int name_approved(const axon_operation_approval_t *approval, const char *
 axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
     const axon_operation_approval_t *approval, axon_operation_result_t *result)
 {
+    if(operation != NULL && operation->busy) {
+        return(AXON_OPERATION_STATE);
+    }
     if(result == NULL) {
         return(AXON_OPERATION_ARGUMENT);
     }
     axon_operation_result_clear(result);
     if(operation == NULL || !operation->prepared) {
         result->status = AXON_OPERATION_STATE;
+        return(result->status);
+    }
+    cancellation(operation, result);
+    if(result->cancelled) {
+        finish(operation, result);
         return(result->status);
     }
     if(approval == NULL || !approval->confirm || approval->plan_id != operation->plan.id
@@ -427,7 +441,10 @@ axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
     }
     axon_alpm_problem_t problem = {0};
     result->may_have_changes = operation->plan.count != 0;
+    operation->busy = 1;
+    operation->committing = 1;
     error = axon_alpm_transaction_commit(operation->core, &problem);
+    operation->committing = 0;
     if(error != ALPM_ERR_OK) {
         backend_problem(result, error, &problem);
     }
@@ -437,9 +454,11 @@ axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
     }
     axon_alpm_problem_clear(&problem);
     if(operation->question) {
+        result->committed = 0;
         result->status = AXON_OPERATION_QUESTION;
         diagnostic(result, "unresolved libalpm question: %d", operation->question);
     }
+    cancellation(operation, result);
     finish(operation, result);
     return(result->status);
 }
@@ -447,6 +466,9 @@ axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
 axon_operation_status_t axon_operation_cancel(axon_operation_t *operation,
     axon_operation_result_t *result)
 {
+    if(operation != NULL && operation->busy) {
+        return(AXON_OPERATION_STATE);
+    }
     if(result == NULL) {
         return(AXON_OPERATION_ARGUMENT);
     }
@@ -464,6 +486,9 @@ axon_operation_status_t axon_operation_cancel(axon_operation_t *operation,
 axon_operation_status_t axon_operation_free(axon_operation_t **operation,
     axon_operation_result_t *result)
 {
+    if(operation != NULL && *operation != NULL && (*operation)->busy) {
+        return(AXON_OPERATION_STATE);
+    }
     if(result == NULL) {
         return(AXON_OPERATION_ARGUMENT);
     }
@@ -483,6 +508,12 @@ axon_operation_status_t axon_operation_free(axon_operation_t **operation,
 axon_operation_status_t axon_operation_refresh(const axon_config_t *config,
     int force, axon_operation_result_t *result)
 {
+    return(axon_operation_refresh_with_callbacks(config, force, NULL, result));
+}
+
+axon_operation_status_t axon_operation_refresh_with_callbacks(const axon_config_t *config,
+    int force, const axon_operation_callbacks_t *callbacks, axon_operation_result_t *result)
+{
     if(result == NULL) {
         return(AXON_OPERATION_ARGUMENT);
     }
@@ -494,16 +525,56 @@ axon_operation_status_t axon_operation_refresh(const axon_config_t *config,
     if(!authorized(result)) {
         return(result->status);
     }
-    axon_operation_t operation = {0};
+    axon_operation_t operation = {.busy = 1};
+    if(callbacks != NULL) {
+        operation.callbacks = *callbacks;
+    }
+    cancellation(&operation, result);
+    if(result->cancelled) {
+        return(result->status);
+    }
     if(axon_config_open(config, &operation.core, &result->config_error) != AXON_CONFIG_OK) {
         result->status = AXON_OPERATION_CONFIG;
         return(result->status);
     }
     result->may_have_changes = 1;
-    alpm_errno_t error = axon_alpm_refresh(operation.core, force, &result->refreshed);
+    alpm_errno_t error = axon_operation_set_callbacks(&operation);
+    if(error == ALPM_ERR_OK) {
+        error = axon_alpm_refresh(operation.core, force, &result->refreshed);
+    }
     if(error != ALPM_ERR_OK) {
         backend_problem(result, error, NULL);
     }
+    if(operation.question) {
+        result->status = AXON_OPERATION_QUESTION;
+        diagnostic(result, "unresolved libalpm question: %d", operation.question);
+    }
+    cancellation(&operation, result);
     finish(&operation, result);
+    return(result->status);
+}
+
+axon_operation_status_t axon_operation_prepare_upgrade(const axon_config_t *config,
+    int force, const axon_operation_request_t *request, axon_operation_t **operation,
+    axon_operation_result_t *result)
+{
+    if(result == NULL) {
+        return(AXON_OPERATION_ARGUMENT);
+    }
+    axon_operation_result_clear(result);
+    if(config == NULL || operation == NULL || *operation != NULL || !validate(request)
+            || request->kind != AXON_OPERATION_UPGRADE) {
+        result->status = AXON_OPERATION_ARGUMENT;
+        return(result->status);
+    }
+    if(axon_operation_refresh_with_callbacks(config, force, &request->callbacks, result)
+            != AXON_OPERATION_OK) {
+        return(result->status);
+    }
+    int refreshed = result->refreshed;
+    int changed = result->may_have_changes;
+    axon_operation_prepare(config, request, operation, result);
+    result->refreshed = refreshed;
+    result->may_have_changes |= changed;
     return(result->status);
 }
