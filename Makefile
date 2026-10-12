@@ -13,7 +13,7 @@ TEST_FLAGS = $(shell $(PKG_CONFIG) --cflags libarchive)
 TEST_LIBS = $(shell $(PKG_CONFIG) --libs libarchive)
 OBJECTS = src/alpm/alpm_core.o src/alpm/alpm_extra.o \
           src/config/pacman_config.o src/config/config_alpm.o src/security/privilege.o \
-          src/core/operation.o src/core/plan.o src/core/callbacks.o src/core/maintenance.o src/core/inspection.o
+          src/core/operation.o src/core/plan.o src/core/callbacks.o src/core/maintenance.o src/core/inspection.o src/ui/output.o
 
 .PHONY: all test clean
 
@@ -55,11 +55,11 @@ tests/privileged_driver.out: tests/download_driver.c libaxon-alpm.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG -DAXON_TEST_PRODUCTION $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(LDLIBS) -o $@
 
 .PHONY: test-privileged
-tests/helper_failure_test.out: tests/helper_failure_test.c libaxon-alpm.a axon
-	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -lutil -o $@
+tests/helper_failure_test.out: tests/helper_failure_test.c tests/root_fixture.c tests/root_fixture.h libaxon-alpm.a axon
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< tests/root_fixture.c libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -lutil -o $@
 
-test-privileged: axon tests/privileged_driver.out tests/helper_failure_test.out
-	python3 tests/privileged_test.py --cli
+test-privileged: axon tests/privileged_test.out tests/helper_failure_test.out
+	./tests/privileged_test.out
 	unshare --user --map-root-user --mount --pid --fork --net ./tests/helper_failure_test.out
 
 tests/disk_full.so: tests/disk_full.c
@@ -80,7 +80,7 @@ test-package: tests/package_test.out
 
 regression: test test-privileged test-package
 
-test: tests/ui_test.out tests/maintenance_test.out tests/disk_full.so tests/download_driver.out tests/alpm_extra_test.out tests/config_test.out tests/config_alloc_test.out tests/cli_test.out tests/privilege_test.out tests/operation_test.out
+test: tests/download_test.out tests/ui_test.out tests/maintenance_test.out tests/disk_full.so tests/download_driver.out tests/alpm_extra_test.out tests/config_test.out tests/config_alloc_test.out tests/cli_test.out tests/privilege_test.out tests/operation_test.out
 	./tests/alpm_extra_test.out
 	./tests/config_test.out
 	./tests/config_alloc_test.out
@@ -89,10 +89,14 @@ test: tests/ui_test.out tests/maintenance_test.out tests/disk_full.so tests/down
 	./tests/operation_test.out
 	./tests/maintenance_test.out
 	./tests/inspection_test.out
+	./tests/output_test.out
+	./tests/progress_test.out
 	./tests/ui_test.out
-	python3 tests/download_test.py
+	./tests/download_test.out
 
 clean:
+	$(RM) tests/progress_test.out
+	$(RM) tests/download_test.out tests/privileged_test.out tests/output_test.out
 	$(RM) tests/inspection_test.out
 	$(RM) src/cli/query.o src/cli/query.d
 	$(RM) tests/helper_failure_test.out
@@ -122,6 +126,7 @@ PACKAGE = build/axon-$(VERSION)-$(PKGREL)-$(CARCH).pkg.tar.zst
 check-deps:
 	@$(PKG_CONFIG) --exists 'libalpm >= 16.0' 'libalpm < 17.0' || { echo 'Axon requires libalpm 16.x (pacman development files).' >&2; exit 1; }
 	@$(PKG_CONFIG) --exists 'ncursesw >= 6.0' || { echo 'Axon requires ncursesw 6.x or newer.' >&2; exit 1; }
+	@$(PKG_CONFIG) --exists libarchive || { echo 'Axon requires libarchive development files.' >&2; exit 1; }
 
 src/alpm/alpm_core.o src/ui/terminal.o: | check-deps
 
@@ -175,14 +180,32 @@ test-c: tests/alpm_extra_test.out tests/config_test.out tests/config_alloc_test.
 	./tests/operation_test.out
 	./tests/maintenance_test.out
 	./tests/inspection_test.out
+	./tests/output_test.out
+	./tests/progress_test.out
 	./tests/ui_test.out
 
 sanitize:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
-	$(MAKE) test-c CC=clang CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'
+	$(MAKE) test CC=clang CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'
 
 tests/inspection_test.out: tests/inspection_test.c libaxon-alpm.a axon
 	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -o $@
 
 test test-c: tests/inspection_test.out
+
+tests/download_test.out: tests/download_test.c tests/root_fixture.c tests/root_fixture.h tests/download_driver.out tests/disk_full.so libaxon-alpm.a
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< tests/root_fixture.c libaxon-alpm.a $(ALPM_LIBS) $(LDLIBS) -o $@
+
+tests/privileged_test.out: tests/privileged_test.c tests/root_fixture.c tests/root_fixture.h tests/privileged_driver.out tests/helper_failure_test.out libaxon-alpm.a
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< tests/root_fixture.c libaxon-alpm.a $(ALPM_LIBS) $(LDLIBS) -o $@
+
+tests/output_test.out: tests/output_test.c src/ui/output.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+test test-c: tests/output_test.out
+
+tests/progress_test.out: tests/progress_test.c src/cli/mutation.c libaxon-alpm.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(LDLIBS) -lutil -o $@
+
+test test-c: tests/progress_test.out

@@ -184,6 +184,20 @@ int main(void)
     expect("fixture");
     send_keys("q");
     finish(0);
+    write_file("db/local/fixture-1-1/desc", "%NAME%\nfixture\n\n%VERSION%\n1-1\n\n%DESC%\n"
+               "界é description \033]52;c;injected\a\n\n");
+    assert(setenv("NO_COLOR", "1", 1) == 0);
+    start(config, 24, 100);
+    expect("fixture");
+    send_keys("\n");
+    expect("Press Enter to return");
+    assert(strstr(output, "\\x1b]52;c;injected\\x07"));
+    assert(!strstr(output, "\033]52;") && !strstr(output, "38;2;") && !strstr(output, "[34m"));
+    send_keys("\n");
+    expect("fixture");
+    send_keys("q");
+    finish(0);
+    assert(unsetenv("NO_COLOR") == 0);
     assert(nftw("db/local/fixture-1-1", remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
     start(config, 24, 100);
     expect("0 packages");

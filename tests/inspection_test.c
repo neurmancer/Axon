@@ -154,6 +154,15 @@ int main(void)
     compare("-Qs", "Alpha");
     compare("-Qo", "root/bin/tool");
     char output[32768];
+    compare("-Ss", "Alpha");
+    char limited[4096], reference[32768];
+    snprintf(limited, sizeof(limited), "[options]\nRootDir = %s/root\nDBPath = %s/db\nSigLevel = Never\n[test]\nUsage = Install\n", workspace, workspace);
+    write_text("pacman.conf", limited);
+    assert(run(binary, "-Ss", "Alpha", NULL, output, sizeof(output)) == 0);
+    assert(run("/usr/bin/pacman", "-Ss", "Alpha", NULL, reference, sizeof(reference)) == 1);
+    assert(!*output && !*reference);
+    assert(run(binary, "-Ss", NULL, NULL, output, sizeof(output)) == 0 && !*output);
+    write_text("pacman.conf", text);
     assert(run(binary, "-Si", "test/alpha", NULL, output, sizeof(output)) == 0 && strstr(output, "Alpha fixture"));
     assert(run("/usr/bin/pacman", "-Si", "test/alpha", NULL, output, sizeof(output)) == 0 && strstr(output, "Alpha fixture"));
     assert(run(binary, "-Qkk", "alpha", "--checksums", output, sizeof(output)) == 0);

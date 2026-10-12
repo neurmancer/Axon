@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "../ui/output.h"
 #include "alpm_extra.h"
 #include "pacman_config.h"
 #include "privilege.h"
@@ -10,6 +11,7 @@
 #include "../ui/theme.h"
 
 #include <getopt.h>
+#include <locale.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,10 +58,11 @@ static void usage(FILE *output)
 
 int main(int argc, char **argv)
 {
+    setlocale(LC_CTYPE, "");
     axon_privilege_result_t identity = axon_privilege_check(0);
     
     if(identity != AXON_PRIVILEGE_OK) {
-        fprintf(stderr, "axon: %s\n", axon_privilege_message(identity));
+        axon_fprintf(stderr, "axon: %s\n", axon_privilege_message(identity));
         return(1);
     }
 
@@ -74,18 +77,18 @@ int main(int argc, char **argv)
     int maintenance = 0;
     int option;
     axon_query_t view = {0};
-    int needed = 0, cascade = 0, nosave = 0;
+    int needed = 0, cascade = 0, nosave = 0, domain = 0;
     
     static const struct option options[] = {
         {"config", required_argument, NULL, 256},
         {"query", no_argument, NULL, 'Q'},
         {"sync", no_argument, NULL, 'S'},
         {"info", no_argument, NULL, 'i'},
-        {"search", no_argument, NULL, 's'},
+        {"search", no_argument, NULL, 270},
         {"remove", no_argument, NULL, 'R'},
         {"upgrade", no_argument, NULL, 'U'},
         {"refresh", no_argument, NULL, 'y'},
-        {"sysupgrade", no_argument, NULL, 'u'},
+        {"sysupgrade", no_argument, NULL, 274},
         {"allow-downgrade", no_argument, NULL, 257},
         {"orphans", no_argument, NULL, AXON_ORPHANS},
         {"depends", no_argument, NULL, AXON_DEPENDENCIES},
@@ -98,16 +101,16 @@ int main(int argc, char **argv)
         {"owns", no_argument, NULL, 'o'},
         {"groups", no_argument, NULL, 'g'},
         {"foreign", no_argument, NULL, 'm'},
-        {"native", no_argument, NULL, 'n'},
+        {"native", no_argument, NULL, 272},
         {"explicit", no_argument, NULL, 'e'},
         {"deps", no_argument, NULL, 'd'},
         {"check", no_argument, NULL, 'k'},
         {"checksums", no_argument, NULL, 259},
         {"needed", no_argument, NULL, 258},
         {"cascade", no_argument, NULL, 'c'},
-        {"recursive", no_argument, NULL, 's'},
-        {"nosave", no_argument, NULL, 'n'},
-        {"unneeded", no_argument, NULL, 'u'},
+        {"recursive", no_argument, NULL, 271},
+        {"nosave", no_argument, NULL, 273},
+        {"unneeded", no_argument, NULL, 275},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
@@ -131,6 +134,12 @@ int main(int argc, char **argv)
             case 's':
                 searching++;
                 break;
+            case 270: searching++; domain |= 4; break;
+            case 271: searching++; domain |= 2; break;
+            case 272: view.native = 1; domain |= 1; break;
+            case 273: view.native = 1; domain |= 2; break;
+            case 274: upgrade++; domain |= 8; break;
+            case 275: upgrade++; domain |= 2; break;
             case 'l': view.files = 1; break;
             case 'o': view.owns = 1; break;
             case 'g': view.groups++; break;
@@ -187,7 +196,8 @@ int main(int argc, char **argv)
     int modifiers = info + !!view.search + view.files + view.owns + !!view.groups + !!view.check;
     int filters = view.foreign || view.native || view.explicit_only || view.dependencies;
     int mutation = remove || local || (sync && modifiers == 0);
-    int invalid = path[0] == '\0';
+    int invalid = path[0] == '\0' || ((domain & 1) && !query) || ((domain & 2) && !remove)
+        || ((domain & 4) && !(query || sync)) || ((domain & 8) && !sync);
     if(maintenance) {
         int targets = maintenance == AXON_DEPENDENCIES || maintenance == AXON_REASON_EXPLICIT
             || maintenance == AXON_REASON_DEPENDENCY;
@@ -227,7 +237,7 @@ int main(int argc, char **argv)
         flags |= upgrade ? ALPM_TRANS_FLAG_UNNEEDED : 0;
     }
     if(mutation && (identity = axon_privilege_check(1)) != AXON_PRIVILEGE_OK) {
-        fprintf(stderr, "axon: %s\n", axon_privilege_message(identity));
+        axon_fprintf(stderr, "axon: %s\n", axon_privilege_message(identity));
         return(1);
     }
 
@@ -238,7 +248,7 @@ int main(int argc, char **argv)
     int result = 1;
     
     if(axon_config_load(path, &config, &error) != AXON_CONFIG_OK) {
-        fprintf(stderr, "axon: %s:%zu: %s\n", error.file, error.line, error.message);
+        axon_fprintf(stderr, "axon: %s:%zu: %s\n", error.file, error.line, error.message);
         goto cleanup;
     }
 
@@ -256,7 +266,7 @@ int main(int argc, char **argv)
     }
     if((view.check ? axon_config_open_readonly(config, &core, &error)
                    : axon_config_open(config, &core, &error)) != AXON_CONFIG_OK) {
-        fprintf(stderr, "axon: %s:%zu: %s\n", error.file, error.line, error.message);
+        axon_fprintf(stderr, "axon: %s:%zu: %s\n", error.file, error.line, error.message);
         goto cleanup;
     }
 
@@ -268,7 +278,7 @@ cleanup:
         result = 1;
     }
     axon_config_free(&config);
-    if(fflush(stdout) != 0 || ferror(stdout)) {
+    if(axon_output_failed() || fflush(stdout) != 0 || ferror(stdout) || fflush(stderr) != 0 || ferror(stderr)) {
         fputs("axon: failed to write output\n", stderr);
         result = 1;
     }

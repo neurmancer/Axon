@@ -478,15 +478,23 @@ int main(void)
         allocation_count = 0;
         allocation_failure = index;
         allocation_enabled = 1;
-        EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_EXECUTION);
+        axon_operation_status_t status = axon_operation_commit(operation, &approved, &result);
         allocation_enabled = 0;
         if(index == 0) {
+            assert(status == AXON_OPERATION_EXECUTION);
             commit_allocations = allocation_count;
         }
+        else if(!result.may_have_changes) {
+            assert(status == AXON_OPERATION_BACKEND && result.backend_error == ALPM_ERR_MEMORY);
+            assert(!result.completed_packages);
+        }
         else {
+            assert(status == AXON_OPERATION_EXECUTION);
             assert(result.diagnostics_incomplete);
         }
-        assert(result.completed_packages == 1 && result.package_phase_completed && result.committed);
+        if(result.may_have_changes) {
+            assert(result.completed_packages == 1 && result.package_phase_completed && result.committed);
+        }
         release(&operation);
     }
     commit_log = 0;
@@ -640,6 +648,14 @@ int main(void)
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
     release(&operation);
     installed(config, "versioned", "1-1", ALPM_PKG_REASON_EXPLICIT);
+    request.flags |= ALPM_TRANS_FLAG_NEEDED;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    assert(axon_operation_plan(operation)->count == 0);
+    approved = approval(operation);
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
+    assert(!result.may_have_changes);
+    release(&operation);
+    request.flags &= ~ALPM_TRANS_FLAG_NEEDED;
     targets[0].name = locals[5].path;
     EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_BACKEND);
     assert(result.backend_error == ALPM_ERR_PKG_INVALID_ARCH);

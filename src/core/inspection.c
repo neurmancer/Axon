@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -64,6 +65,68 @@ static int backup(alpm_pkg_t *package, const char *name)
         }
     }
     return(0);
+}
+
+alpm_errno_t axon_maintenance_writable(axon_alpm_t *core,
+    const alpm_list_t *additions, const alpm_list_t *removals,
+    axon_maintenance_message_t message, void *context)
+{
+    int root = open(alpm_option_get_root(core->handle), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if(root < 0) {
+        return(ALPM_ERR_SYSTEM);
+    }
+    alpm_errno_t result = ALPM_ERR_OK;
+    const alpm_list_t *lists[] = {additions, removals};
+    for(size_t list = 0; list < 2 && result == ALPM_ERR_OK; list++) {
+        for(const alpm_list_t *item = lists[list]; item && result == ALPM_ERR_OK; item = item->next) {
+            alpm_pkg_t *package = item->data;
+            alpm_filelist_t *files = alpm_pkg_get_files(package);
+            if(files == NULL) {
+                result = ALPM_ERR_DB_INVALID;
+                break;
+            }
+            for(size_t index = 0; index < files->count; index++) {
+                const char *name = files->files[index].name;
+                if(list == 0 && alpm_option_match_noextract(core->handle, name) == 0) {
+                    continue;
+                }
+                if(!safe_name(name)) {
+                    result = ALPM_ERR_PKG_INVALID;
+                    break;
+                }
+                char *parent = strdup(name);
+                if(parent == NULL) {
+                    result = ALPM_ERR_MEMORY;
+                    break;
+                }
+                int descriptor;
+                while((descriptor = open_rooted(root, parent, O_PATH | O_NOFOLLOW | O_CLOEXEC)) < 0 && errno == ENOENT) {
+                    char *slash = strrchr(parent, '/');
+                    if(slash == NULL) {
+                        strcpy(parent, ".");
+                    }
+                    else {
+                        *slash = '\0';
+                    }
+                }
+                struct statvfs filesystem;
+                if(descriptor < 0 || fstatvfs(descriptor, &filesystem) < 0 || (filesystem.f_flag & ST_RDONLY)) {
+                    report(message, context, "%s: %s%s: destination is read-only or inaccessible; no commit attempted",
+                           alpm_pkg_get_name(package), alpm_option_get_root(core->handle), name);
+                    result = ALPM_ERR_SYSTEM;
+                }
+                if(descriptor >= 0) {
+                    close(descriptor);
+                }
+                free(parent);
+                if(result != ALPM_ERR_OK) {
+                    break;
+                }
+            }
+        }
+    }
+    close(root);
+    return(result);
 }
 
 static int compare_hash(int root, const char *name, struct archive_entry *entry)

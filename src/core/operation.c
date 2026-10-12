@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "operation_internal.h"
+#include "maintenance.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -34,6 +35,11 @@ static void diagnostic(axon_operation_result_t *result, const char *format, ...)
             result->status = AXON_OPERATION_MEMORY;
         }
     }
+}
+
+static void preflight_message(void *context, const char *text)
+{
+    diagnostic(context, "%s", text);
 }
 
 static void backend_problem(axon_operation_result_t *result, alpm_errno_t error,
@@ -480,6 +486,12 @@ axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
     }
     if(operation->plan.count == 0) {
         result->committed = 1;
+        finish(operation, result);
+        return(result->status);
+    }
+    error = axon_maintenance_writable(operation->core, additions, removals, preflight_message, result);
+    if(error != ALPM_ERR_OK) {
+        backend_problem(result, error, NULL);
         finish(operation, result);
         return(result->status);
     }

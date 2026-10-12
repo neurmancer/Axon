@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
       - name: Install build and fixture dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel pacman libarchive ncurses gnupg python clang git zstd util-linux
+          pacman -Syu --noconfirm --needed base-devel pacman libarchive ncurses gnupg clang git zstd util-linux
           useradd --create-home axonci
           chown -R axonci:axonci "$GITHUB_WORKSPACE"
       - name: Strict build and unprivileged regressions
@@ -41,14 +41,14 @@ jobs:
         run: |
           set -o pipefail
           runuser -u axonci -- make clean
-          runuser -u axonci -- make test test-package tests/privileged_driver.out tests/helper_failure_test.out CC="$AXON_COMPILER" CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g' 2>&1 | tee regression.log
+          runuser -u axonci -- make test test-package tests/privileged_test.out tests/helper_failure_test.out CC="$AXON_COMPILER" CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g' 2>&1 | tee regression.log
       - name: Privileged regressions in isolated namespaces and chroots
         run: |
           set -o pipefail
           test "$(id -u)" -eq 0
-          test -x axon && test -x tests/privileged_driver.out && test -x tests/helper_failure_test.out
+          test -x axon && test -x tests/privileged_test.out && test -x tests/helper_failure_test.out
           unshare --user --map-root-user --mount --pid --fork --net true 2>&1 | tee privileged.log
-          python3 tests/privileged_test.py --cli 2>&1 | tee -a privileged.log
+          ./tests/privileged_test.out 2>&1 | tee -a privileged.log
           unshare --user --map-root-user --mount --pid --fork --net ./tests/helper_failure_test.out 2>&1 | tee -a privileged.log
       - name: Preserve results and packages
         if: always()
@@ -77,7 +77,7 @@ jobs:
           persist-credentials: false
       - name: Install dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel pacman libarchive ncurses gnupg python clang util-linux
+          pacman -Syu --noconfirm --needed base-devel pacman libarchive ncurses gnupg clang util-linux
           useradd --create-home axonci
           chown -R axonci:axonci "$GITHUB_WORKSPACE"
       - name: Address, undefined-behavior, and leak regressions

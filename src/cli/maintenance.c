@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../ui/output.h"
 #include "maintenance.h"
 #include "../core/maintenance.h"
 #include "../ui/theme.h"
@@ -34,7 +35,7 @@ static int cache_approval(void *context, const alpm_list_t *paths)
     }
     puts("Remove these cache files according to CleanMethod:");
     for(const alpm_list_t *item = paths; item; item = item->next) {
-        printf("  %s\n", (const char *)item->data);
+        axon_fprintf(stdout, "  %s\n", (const char *)item->data);
     }
     return(confirmation());
 }
@@ -42,15 +43,15 @@ static int cache_approval(void *context, const alpm_list_t *paths)
 static void message(void *context, const char *text)
 {
     (void)context;
-    fprintf(stderr, "axon: %s\n", text);
+    axon_fprintf(stderr, "axon: %s\n", text);
 }
 
 static void dependencies(const char *heading, alpm_list_t *list)
 {
-    printf("%s:", heading);
+    axon_fprintf(stdout, "%s:", heading);
     for(alpm_list_t *item = list; item; item = item->next) {
         char *dependency = alpm_dep_compute_string(item->data);
-        printf(" %s", dependency != NULL ? dependency : "(unavailable)");
+        axon_fprintf(stdout, " %s", dependency != NULL ? dependency : "(unavailable)");
         free(dependency);
     }
     putchar('\n');
@@ -65,9 +66,9 @@ static int maintenance(const axon_config_t *config, int action, int count, char 
         }
 
         else {
-            printf("Mark packages as %s:\n", action == AXON_REASON_EXPLICIT ? "explicitly installed" : "dependencies");
+            axon_fprintf(stdout, "Mark packages as %s:\n", action == AXON_REASON_EXPLICIT ? "explicitly installed" : "dependencies");
             for(int index = 0; index < count; index++) {
-                printf("  %s\n", names[index]);
+                axon_fprintf(stdout, "  %s\n", names[index]);
             }
             if(!confirmation()) {
                 fputs("axon: cancelled\n", stderr);
@@ -81,13 +82,13 @@ static int maintenance(const axon_config_t *config, int action, int count, char 
         }
         int status = result.status == AXON_OPERATION_OK ? 0 : 1;
         if(status) {
-            fprintf(stderr, "axon: maintenance failed (status %d): %s\n", result.status,
+            axon_fprintf(stderr, "axon: maintenance failed (status %d): %s\n", result.status,
                     result.backend_error != ALPM_ERR_OK ? alpm_strerror(result.backend_error) : "action not completed");
             if(result.status == AXON_OPERATION_CONFIG) {
                 message(NULL, result.config_error.message);
             }
             if(result.cleanup_error != ALPM_ERR_OK) {
-                fprintf(stderr, "axon: cleanup: %s\n", alpm_strerror(result.cleanup_error));
+                axon_fprintf(stderr, "axon: cleanup: %s\n", alpm_strerror(result.cleanup_error));
             }
             if(result.may_have_changes) {
                 message(NULL, "Some changes may have completed. Review the reported files/packages before retrying; no rollback was performed.");
@@ -117,7 +118,7 @@ static int maintenance(const axon_config_t *config, int action, int count, char 
         for(const alpm_list_t *item = packages; item; item = item->next) {
             alpm_pkg_t *package = item->data;
             if(axon_package_orphan(package)) {
-                printf("%s %s\n", alpm_pkg_get_name(package), alpm_pkg_get_version(package));
+                axon_fprintf(stdout, "%s %s\n", alpm_pkg_get_name(package), alpm_pkg_get_version(package));
             }
         }
     }
@@ -127,17 +128,17 @@ static int maintenance(const axon_config_t *config, int action, int count, char 
             alpm_pkg_t *package = NULL;
             alpm_errno_t found = axon_alpm_local_package(core, names[index], &package);
             if(found != ALPM_ERR_OK) {
-                fprintf(stderr, "axon: %s: %s\n", names[index], alpm_strerror(found));
+                axon_fprintf(stderr, "axon: %s: %s\n", names[index], alpm_strerror(found));
                 error = found;
                 continue;
             }
-            printf("%s %s\n", alpm_pkg_get_name(package), alpm_pkg_get_version(package));
+            axon_fprintf(stdout, "%s %s\n", alpm_pkg_get_name(package), alpm_pkg_get_version(package));
             dependencies("Dependencies", alpm_pkg_get_depends(package));
             dependencies("Optional dependencies", alpm_pkg_get_optdepends(package));
             alpm_list_t *required = alpm_pkg_compute_requiredby(package);
             fputs("Required by:", stdout);
             for(alpm_list_t *item = required; item; item = item->next) {
-                printf(" %s", (char *)item->data);
+                axon_fprintf(stdout, " %s", (char *)item->data);
             }
             putchar('\n');
             alpm_list_free_inner(required, free);
@@ -156,7 +157,7 @@ int axon_cli_maintenance(const axon_config_t *config, int action, int count, cha
     if(action == AXON_CLEAN_CACHE || action == AXON_REASON_EXPLICIT || action == AXON_REASON_DEPENDENCY) {
         axon_privilege_result_t privilege = axon_privilege_check(1);
         if(privilege != AXON_PRIVILEGE_OK) {
-            fprintf(stderr, "axon: %s\n", axon_privilege_message(privilege));
+            axon_fprintf(stderr, "axon: %s\n", axon_privilege_message(privilege));
             return(1);
         }
     }
@@ -177,7 +178,7 @@ int axon_cli_maintenance(const axon_config_t *config, int action, int count, cha
         return(1);
     }
     int status = maintenance(config, action, count, names);
-    if(fflush(stdout) != 0 || ferror(stdout)) {
+    if(axon_output_failed() || fflush(stdout) != 0 || ferror(stdout) || fflush(stderr) != 0 || ferror(stderr)) {
         status = 1;
     }
     if(interrupted) {

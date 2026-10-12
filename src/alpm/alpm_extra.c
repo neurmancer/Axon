@@ -560,7 +560,13 @@ alpm_errno_t axon_alpm_transaction_package(axon_alpm_t *core, alpm_pkg_t *packag
             || alpm_pkg_get_origin(package) == ALPM_PKG_FROM_LOCALDB) {
         return(ALPM_ERR_WRONG_ARGS);
     }
-    return(status(core, alpm_add_pkg(core->handle, package)));
+    int loaded = alpm_pkg_get_origin(package) == ALPM_PKG_FROM_FILE;
+    error = status(core, alpm_add_pkg(core->handle, package));
+    if(error == ALPM_ERR_OK && loaded
+            && alpm_list_find_ptr(alpm_trans_get_add(core->handle), package) == NULL) {
+        alpm_pkg_free(package);
+    }
+    return(error);
 }
 
 alpm_errno_t axon_alpm_transaction_file(axon_alpm_t *core, const char *path)
@@ -577,7 +583,7 @@ alpm_errno_t axon_alpm_transaction_file(axon_alpm_t *core, const char *path)
         return(error);
     }
 
-    error = status(core, alpm_add_pkg(core->handle, package));
+    error = axon_alpm_transaction_package(core, package);
     if(error != ALPM_ERR_OK) {
         alpm_pkg_free(package);
     }

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../ui/output.h"
 #include "mutation.h"
 #include "../ui/theme.h"
 
@@ -43,8 +44,13 @@ static void progress_bar(const char *label, int percent)
     if(percent > 100) {
         percent = 100;
     }
-    fprintf(stderr, "\r\033[K%s%-.*s %s[", axon_color(stderr, AXON_BLUE), name_width,
-            label, axon_color(stderr, AXON_PURPLE));
+    char *display = axon_display_text(label, name_width);
+    if(display == NULL) {
+        interrupted = SIGPIPE;
+        return;
+    }
+    fprintf(stderr, "\r\033[K%s%s %s[", axon_color(stderr, AXON_BLUE), display, axon_color(stderr, AXON_PURPLE));
+    free(display);
     fputs(axon_color(stderr, AXON_GREEN), stderr);
     for(int index = 0; index < cells; index++) {
         fputc(index < cells * percent / 100 ? '=' : '-', stderr);
@@ -54,7 +60,9 @@ static void progress_bar(const char *label, int percent)
     if(percent == 100) {
         finish_progress();
     }
-    fflush(stderr);
+    if(fflush(stderr) != 0 || ferror(stderr)) {
+        interrupted = SIGPIPE;
+    }
 }
 
 static void interrupt(int number)
@@ -64,7 +72,7 @@ static void interrupt(int number)
 
 static int answer(char *line, size_t size)
 {
-    if(interrupted || input_failed || fflush(stdout) != 0 || ferror(stdout) || fflush(stderr) != 0) {
+    if(interrupted || input_failed || axon_output_failed() || fflush(stdout) != 0 || ferror(stdout) || fflush(stderr) != 0) {
         return(0);
     }
     if(fgets(line, (int)size, stdin) == NULL || interrupted) {
@@ -94,37 +102,37 @@ static axon_decision_t question(void *context, const alpm_question_t *value, siz
     finish_progress();
     switch(value->type) {
         case ALPM_QUESTION_INSTALL_IGNOREPKG:
-            fprintf(stderr, "Ignored package: %s\n", alpm_pkg_get_name(value->install_ignorepkg.pkg));
+            axon_fprintf(stderr, "Ignored package: %s\n", alpm_pkg_get_name(value->install_ignorepkg.pkg));
             break;
         case ALPM_QUESTION_REPLACE_PKG:
-            fprintf(stderr, "Replace %s with %s/%s?\n", alpm_pkg_get_name(value->replace.oldpkg),
+            axon_fprintf(stderr, "Replace %s with %s/%s?\n", alpm_pkg_get_name(value->replace.oldpkg),
                     alpm_db_get_name(value->replace.newdb), alpm_pkg_get_name(value->replace.newpkg));
             break;
         case ALPM_QUESTION_CONFLICT_PKG:
-            fprintf(stderr, "%s conflicts with %s; remove %s?\n",
+            axon_fprintf(stderr, "%s conflicts with %s; remove %s?\n",
                     alpm_pkg_get_name(value->conflict.conflict->package1),
                     alpm_pkg_get_name(value->conflict.conflict->package2),
                     alpm_pkg_get_name(value->conflict.conflict->package2));
             break;
         case ALPM_QUESTION_CORRUPTED_PKG:
-            fprintf(stderr, "Delete invalid archive %s (%s)?\n", value->corrupted.filepath,
+            axon_fprintf(stderr, "Delete invalid archive %s (%s)?\n", value->corrupted.filepath,
                     alpm_strerror(value->corrupted.reason));
             break;
         case ALPM_QUESTION_REMOVE_PKGS:
             fputs("Skip these unresolved targets:\n", stderr);
             for(alpm_list_t *item = value->remove_pkgs.packages; item; item = item->next) {
-                fprintf(stderr, "  %s\n", alpm_pkg_get_name(item->data));
+                axon_fprintf(stderr, "  %s\n", alpm_pkg_get_name(item->data));
             }
             break;
         case ALPM_QUESTION_IMPORT_KEY:
-            fprintf(stderr, "Import key %s (%s)?\n", value->import_key.fingerprint,
+            axon_fprintf(stderr, "Import key %s (%s)?\n", value->import_key.fingerprint,
                     value->import_key.uid != NULL ? value->import_key.uid : "unknown identity");
             break;
         case ALPM_QUESTION_SELECT_PROVIDER: {
             size_t count = 0;
             for(alpm_list_t *item = value->select_provider.providers; item; item = item->next) {
                 alpm_pkg_t *package = item->data;
-                fprintf(stderr, "  %zu) %s/%s\n", ++count,
+                axon_fprintf(stderr, "  %zu) %s/%s\n", ++count,
                         alpm_db_get_name(alpm_pkg_get_db(package)), alpm_pkg_get_name(package));
             }
             fputs("Choose provider number (empty cancels): ", stderr);
@@ -155,7 +163,9 @@ static void log_message(void *context, alpm_loglevel_t level, const char *format
     (void)context;
     if(level & (ALPM_LOG_ERROR | ALPM_LOG_WARNING)) {
         finish_progress();
-        vfprintf(stderr, format, args);
+        if(axon_vfprintf(stderr, format, args) < 0) {
+            interrupted = SIGPIPE;
+        }
     }
 }
 
@@ -164,7 +174,9 @@ static void event(void *context, alpm_event_t *value)
     (void)context;
     if(value->type == ALPM_EVENT_SCRIPTLET_INFO) {
         finish_progress();
-        fputs(value->scriptlet_info.line, stderr);
+        if(axon_fprintf(stderr, "%s\n", value->scriptlet_info.line) < 0) {
+            interrupted = SIGPIPE;
+        }
     }
 }
 
@@ -203,16 +215,16 @@ static void report(const axon_operation_result_t *result)
 {
     finish_progress();
     if(result->status == AXON_OPERATION_CONFIG) {
-        fprintf(stderr, "axon: %s:%zu: %s\n", result->config_error.file,
+        axon_fprintf(stderr, "axon: %s:%zu: %s\n", result->config_error.file,
                 result->config_error.line, result->config_error.message);
     }
     for(alpm_list_t *item = result->status != AXON_OPERATION_OK ? result->diagnostics : NULL;
             item; item = item->next) {
-        fprintf(stderr, "axon: %s\n", (char *)item->data);
+        axon_fprintf(stderr, "axon: %s\n", (char *)item->data);
     }
     if(result->status != AXON_OPERATION_OK && result->diagnostics == NULL
             && result->status != AXON_OPERATION_CONFIG) {
-        fprintf(stderr, "axon: operation failed (status %d)\n", result->status);
+        axon_fprintf(stderr, "axon: operation failed (status %d)\n", result->status);
     }
     if(result->backend_error == ALPM_ERR_HANDLE_LOCK) {
         fputs("axon: another package manager may be running; verify ownership of the database lock before any manual recovery\n", stderr);
@@ -227,11 +239,11 @@ static void report(const axon_operation_result_t *result)
         fputs("axon: some transaction diagnostics could not be retained\n", stderr);
     }
     if(result->status != AXON_OPERATION_OK && result->package_phase_completed) {
-        fprintf(stderr, "axon: package processing completed (%zu package operations); transaction reported errors\n",
+        axon_fprintf(stderr, "axon: package processing completed (%zu package operations); transaction reported errors\n",
                 result->completed_packages);
     }
     else if(result->status != AXON_OPERATION_OK && result->completed_packages != 0) {
-        fprintf(stderr, "axon: %zu package operations completed before failure\n", result->completed_packages);
+        axon_fprintf(stderr, "axon: %zu package operations completed before failure\n", result->completed_packages);
     }
     if(result->status != AXON_OPERATION_OK && result->may_have_changes) {
         fputs("axon: changes may have occurred; no automatic rollback was performed\n", stderr);
@@ -244,7 +256,7 @@ int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
 {
     axon_privilege_result_t privilege = axon_privilege_check(1);
     if(privilege != AXON_PRIVILEGE_OK) {
-        fprintf(stderr, "axon: %s\n", axon_privilege_message(privilege));
+        axon_fprintf(stderr, "axon: %s\n", axon_privilege_message(privilege));
         return(1);
     }
     struct sigaction action = {.sa_handler = interrupt}, previous_int, previous_term, previous_pipe;
@@ -317,18 +329,19 @@ int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
     }
     const axon_operation_plan_t *plan = axon_operation_plan(operation);
     static const char *changes[] = {"install", "remove", "upgrade", "downgrade", "reinstall", "replace"};
-    printf("%sPrepared transaction: %zu package changes%s\n", axon_color(stdout, AXON_PURPLE),
+    fprintf(stdout, "%sPrepared transaction: %zu package changes%s\n", axon_color(stdout, AXON_PURPLE),
            plan->count, axon_color(stdout, AXON_RESET));
     for(size_t index = 0; index < plan->count; index++) {
         const axon_plan_entry_t *entry = &plan->entries[index];
-        printf("  %s%s %s: %s -> %s%s%s\n", axon_color(stdout, AXON_BLUE), changes[entry->kind], entry->name,
+        fputs(axon_color(stdout, AXON_BLUE), stdout);
+        axon_fprintf(stdout, "  %s %s: %s -> %s%s\n", changes[entry->kind], entry->name,
                entry->old_version != NULL ? entry->old_version : "-",
-               entry->new_version != NULL ? entry->new_version : "-",
-               entry->held ? " [protected removal]" : "", axon_color(stdout, AXON_RESET));
+               entry->new_version != NULL ? entry->new_version : "-", entry->held ? " [protected removal]" : "");
+        fputs(axon_color(stdout, AXON_RESET), stdout);
     }
-    printf("Download: %" PRIu64 " bytes; installed size change: %" PRId64 " bytes\n",
+    axon_fprintf(stdout, "Download: %" PRIu64 " bytes; installed size change: %" PRId64 " bytes\n",
            plan->download_bytes, plan->installed_delta);
-    if(fflush(stdout) != 0 || ferror(stdout)) {
+    if(axon_output_failed() || fflush(stdout) != 0 || ferror(stdout) || fflush(stderr) != 0 || ferror(stderr)) {
         goto done;
     }
     if(plan->count == 0) {
@@ -345,7 +358,7 @@ int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
         .approved_flags = plan->flags, .protected_removals = protected};
     for(size_t index = 0; index < plan->count; index++) {
         if(plan->entries[index].held) {
-            fprintf(stderr, "Protected package: %s\n", plan->entries[index].name);
+            axon_fprintf(stderr, "Protected package: %s\n", plan->entries[index].name);
             if(!confirm("Approve removal of this exact package?")) {
                 goto declined;
             }
@@ -364,7 +377,7 @@ int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
     axon_operation_commit(operation, &approval, &result);
     report(&result);
     if(result.status == AXON_OPERATION_OK) {
-        printf("%sTransaction completed.%s\n", axon_color(stdout, AXON_GREEN), axon_color(stdout, AXON_RESET));
+        fprintf(stdout, "%sTransaction completed.%s\n", axon_color(stdout, AXON_GREEN), axon_color(stdout, AXON_RESET));
         exit_status = 0;
     }
     goto done;
@@ -385,7 +398,7 @@ done:
     }
     free(qualified);
     free(targets);
-    if(fflush(stdout) != 0 || ferror(stdout)) {
+    if(axon_output_failed() || fflush(stdout) != 0 || ferror(stdout) || fflush(stderr) != 0 || ferror(stderr)) {
         fputs("axon: failed to write output\n", stderr);
         exit_status = 1;
     }

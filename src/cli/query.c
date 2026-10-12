@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../ui/output.h"
 #include "query.h"
 #include "alpm_extra.h"
 #include "alpm_internal.h"
@@ -12,6 +13,15 @@
 
 static int selected(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *package)
 {
+    if(query->sync && query->search) {
+        int usage;
+        if(alpm_db_get_usage(alpm_pkg_get_db(package), &usage) < 0) {
+            return(-1);
+        }
+        if(!(usage & ALPM_DB_USAGE_SEARCH)) {
+            return(0);
+        }
+    }
     if(query->explicit_only && alpm_pkg_get_reason(package) != ALPM_PKG_REASON_EXPLICIT) {
         return(0);
     }
@@ -39,7 +49,7 @@ static const char *value(const char *text)
 static void message(void *context, const char *text)
 {
     (void)context;
-    fprintf(stderr, "axon: %s\n", text);
+    axon_fprintf(stderr, "axon: %s\n", text);
 }
 
 static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *package)
@@ -56,30 +66,30 @@ static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *packag
             return(1);
         }
         for(size_t index = 0; index < files->count; index++) {
-            printf("%s %s%s\n", name, alpm_option_get_root(core->handle), files->files[index].name);
+            axon_fprintf(stdout, "%s %s%s\n", name, alpm_option_get_root(core->handle), files->files[index].name);
         }
     }
     else if(query->info) {
-        printf("Name           : %s\nVersion        : %s\nDescription    : %s\n"
+        axon_fprintf(stdout, "Name           : %s\nVersion        : %s\nDescription    : %s\n"
                "Architecture   : %s\nURL            : %s\nInstalled size : %jd bytes\n",
                name, version, value(alpm_pkg_get_desc(package)), value(alpm_pkg_get_arch(package)),
                value(alpm_pkg_get_url(package)), (intmax_t)alpm_pkg_get_isize(package));
         if(query->sync) {
-            printf("Repository     : %s\n", alpm_db_get_name(alpm_pkg_get_db(package)));
+            axon_fprintf(stdout, "Repository     : %s\n", alpm_db_get_name(alpm_pkg_get_db(package)));
         }
         else {
-            printf("Install reason : %s\n", alpm_pkg_get_reason(package) == ALPM_PKG_REASON_EXPLICIT
+            axon_fprintf(stdout, "Install reason : %s\n", alpm_pkg_get_reason(package) == ALPM_PKG_REASON_EXPLICIT
                 ? "Explicitly installed" : "Installed as a dependency");
         }
         putchar('\n');
     }
     else if(query->search) {
-        printf("%s/%s %s", query->sync ? alpm_db_get_name(alpm_pkg_get_db(package)) : "local", name, version);
+        axon_fprintf(stdout, "%s/%s %s", query->sync ? alpm_db_get_name(alpm_pkg_get_db(package)) : "local", name, version);
         alpm_list_t *groups = alpm_pkg_get_groups(package);
         if(groups != NULL) {
             fputs(" (", stdout);
             for(alpm_list_t *group = groups; group; group = group->next) {
-                printf("%s%s", group == groups ? "" : " ", (char *)group->data);
+                axon_fprintf(stdout, "%s%s", group == groups ? "" : " ", (char *)group->data);
             }
             putchar(')');
         }
@@ -90,14 +100,14 @@ static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *packag
                     fputs(" [installed]", stdout);
                 }
                 else {
-                    printf(" [installed: %s]", alpm_pkg_get_version(installed));
+                    axon_fprintf(stdout, " [installed: %s]", alpm_pkg_get_version(installed));
                 }
             }
         }
-        printf("\n    %s\n", value(alpm_pkg_get_desc(package)));
+        axon_fprintf(stdout, "\n    %s\n", value(alpm_pkg_get_desc(package)));
     }
     else {
-        printf("%s %s\n", name, version);
+        axon_fprintf(stdout, "%s %s\n", name, version);
     }
     return(0);
 }
@@ -151,7 +161,7 @@ static int ownership(axon_alpm_t *core, int count, char **targets)
                         size--;
                     }
                     if(strlen(relative) == size && strncmp(relative, record, size) == 0) {
-                        printf("%s is owned by %s %s\n", absolute,
+                        axon_fprintf(stdout, "%s is owned by %s %s\n", absolute,
                                alpm_pkg_get_name(package), alpm_pkg_get_version(package));
                         found = 1;
                         break;
@@ -160,7 +170,7 @@ static int ownership(axon_alpm_t *core, int count, char **targets)
             }
         }
         if(!found) {
-            fprintf(stderr, "axon: no package owns %s\n", targets[index]);
+            axon_fprintf(stderr, "axon: no package owns %s\n", targets[index]);
             status = 1;
         }
         free(directory);
@@ -190,7 +200,7 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
     alpm_errno_t error = axon_alpm_search(core, query->sync, patterns, &packages);
     alpm_list_free(patterns);
     if(error != ALPM_ERR_OK) {
-        fprintf(stderr, "axon: %s search failed: %s\n", query->sync ? "repository" : "local", alpm_strerror(error));
+        axon_fprintf(stderr, "axon: %s search failed: %s\n", query->sync ? "repository" : "local", alpm_strerror(error));
         return(1);
     }
     int status = 0;
@@ -216,14 +226,14 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
                     found = 1;
                     if(query->sync && !count && query->groups == 1) {
                         if(alpm_list_find_str(seen_groups, group->data) == NULL) {
-                            puts(group->data);
+                            axon_fprintf(stdout, "%s\n", (char *)group->data);
                             if(alpm_list_append(&seen_groups, group->data) == NULL) {
                                 status = 1;
                             }
                         }
                     }
                     else {
-                        printf("%s %s\n", (char *)group->data, alpm_pkg_get_name(package));
+                        axon_fprintf(stdout, "%s %s\n", (char *)group->data, alpm_pkg_get_name(package));
                     }
                 }
                 continue;
@@ -249,7 +259,7 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
             }
         }
         if(!found && count && !query->search) {
-            fprintf(stderr, "axon: %s: package or group not found\n", targets[index]);
+            axon_fprintf(stderr, "axon: %s: package or group not found\n", targets[index]);
             status = 1;
         }
     }

@@ -402,6 +402,50 @@ static void differential(void)
     assert(strcmp(options->root_dir, "/tmp") == 0 && strcmp(options->db_path, "/tmp") == 0);
     assert(options->parallel_downloads == 4 && strcmp(options->xfer_command, "second") == 0);
     axon_config_free(&config);
+
+    write_file("paths.conf", "[options]\nRootDir = /tmp\nDBPath = /tmp\n"
+               "LogFile = /tmp/axon-log\nGPGDir = /tmp\nDownloadUser = nobody\n"
+               "DisableSandboxFilesystem\nDisableSandboxSyscalls\nDisableDownloadTimeout\n"
+               "CleanMethod = KeepInstalled KeepCurrent\nCheckSpace\n"
+               "SigLevel = Required DatabaseOptional\nLocalFileSigLevel = Optional\n"
+               "RemoteFileSigLevel = Required\n[core]\nUsage = Sync Search\n");
+    config = load("paths.conf");
+    options = axon_config_options(config);
+    const char *keys[] = {"RootDir", "DBPath", "LogFile", "GPGDir", "DownloadUser"};
+    const char *values[] = {options->root_dir, options->db_path, options->log_file,
+                           options->gpg_dir, options->download_user};
+    for(size_t index = 0; index < sizeof(keys) / sizeof(*keys); index++) {
+        char *actual = pacman_query("paths.conf", NULL, keys[index]);
+        actual[strcspn(actual, "\n")] = '\0';
+        assert(strcmp(actual, values[index]) == 0);
+        free(actual);
+    }
+    const char *flags[] = {"DisableSandboxFilesystem", "DisableSandboxSyscalls", "DisableDownloadTimeout", "CheckSpace"};
+    const int enabled[] = {options->disable_sandbox_filesystem, options->disable_sandbox_syscalls,
+                          options->disable_download_timeout, options->check_space};
+    char *complete = pacman_query("paths.conf", NULL, NULL);
+    for(size_t index = 0; index < sizeof(flags) / sizeof(*flags); index++) {
+        char line[80];
+        snprintf(line, sizeof(line), "\n%s\n", flags[index]);
+        assert(enabled[index] && strstr(complete, line));
+    }
+    free(complete);
+    char *actual = pacman_query("paths.conf", "core", "Usage");
+    assert(strcmp(actual, "Sync\nSearch\n") == 0);
+    assert(((axon_config_repo_t *)axon_config_repositories(config)->data)->usage == (ALPM_DB_USAGE_SYNC | ALPM_DB_USAGE_SEARCH));
+    free(actual);
+    actual = pacman_query("paths.conf", NULL, "CleanMethod");
+    assert(strcmp(actual, "KeepInstalled\nKeepCurrent\n") == 0 && options->clean_keep_installed && options->clean_keep_current);
+    free(actual);
+    actual = pacman_query("paths.conf", NULL, "LocalFileSigLevel");
+    assert(strcmp(actual, "PackageOptional\nPackageTrustedOnly\n") == 0);
+    assert(options->local_file_siglevel == (ALPM_SIG_PACKAGE | ALPM_SIG_PACKAGE_OPTIONAL | ALPM_SIG_DATABASE | ALPM_SIG_DATABASE_OPTIONAL));
+    free(actual);
+    actual = pacman_query("paths.conf", NULL, "RemoteFileSigLevel");
+    assert(strcmp(actual, "PackageRequired\nPackageTrustedOnly\n") == 0);
+    assert(options->remote_file_siglevel == (ALPM_SIG_PACKAGE | ALPM_SIG_DATABASE));
+    free(actual);
+    axon_config_free(&config);
 }
 
 static int remove_entry(const char *path, const struct stat *info, int type, struct FTW *walk)

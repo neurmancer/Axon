@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "terminal.h"
 #include "theme.h"
+#include "output.h"
+#include <limits.h>
 #include "../cli/mutation.h"
 #include "../cli/maintenance.h"
 #include "alpm_extra.h"
@@ -81,9 +83,9 @@ static int add(row_t **rows, size_t *count, alpm_pkg_t *package, int remote)
     const char *name = alpm_pkg_get_name(package);
     const char *repository = remote ? alpm_db_get_name(alpm_pkg_get_db(package)) : "";
     row->name = strdup(name);
-    row->version = strdup(alpm_pkg_get_version(package));
+    row->version = axon_display_text(alpm_pkg_get_version(package), INT_MAX);
     const char *description = alpm_pkg_get_desc(package);
-    row->description = strdup(description != NULL ? description : "");
+    row->description = axon_display_text(description != NULL ? description : "", INT_MAX);
     row->target = malloc(strlen(repository) + strlen(name) + 2);
     if(row->target != NULL) {
         sprintf(row->target, "%s%s%s", repository, remote ? "/" : "", name);
@@ -96,7 +98,7 @@ static int load(const axon_config_t *config, int remote, row_t **rows, size_t *c
     axon_alpm_t *core = NULL;
     axon_config_error_t error;
     if(axon_config_open(config, &core, &error) != AXON_CONFIG_OK) {
-        fprintf(stderr, "axon: %s\n", error.message);
+        axon_fprintf(stderr, "axon: %s\n", error.message);
         return(0);
     }
     int success = 1;
@@ -191,7 +193,13 @@ int axon_terminal(const axon_config_t *config)
 
         else {
             attron(theme_pair(2) | A_BOLD);
-            mvprintw(0, 0, "Axon | %s | %zu packages | filter: %s", remote ? "Repositories" : "Installed", shown, filter);
+            char heading[256];
+            snprintf(heading, sizeof(heading), "Axon | %s | %zu packages | filter: %s", remote ? "Repositories" : "Installed", shown, filter);
+            char *header = axon_display_text(heading, width - 1);
+            if(header != NULL) {
+                mvaddstr(0, 0, header);
+                free(header);
+            }
             attrset(theme_pair(1));
             mvaddnstr(1, 0, "Tab switch  / filter  Space select  i install  r remove  u upgrade  q quit", width - 1);
             size_t capacity = (size_t)(height - 5);
@@ -202,12 +210,28 @@ int axon_terminal(const axon_config_t *config)
                 if(index == current) {
                     attrset(theme_pair(2) | A_REVERSE | A_BOLD);
                 }
-                mvprintw(2 + (int)(index - first), 0, "%c %-.*s %s", row->selected ? '*' : ' ',
-                         width / 2, row->target, row->version);
+                char *label = axon_display_text(row->target, width / 2);
+                char *version = axon_display_text(row->version, width - width / 2 - 4);
+                if(label != NULL && version != NULL) {
+                    mvprintw(2 + (int)(index - first), 0, "%c %s", row->selected ? '*' : ' ', label);
+                    mvaddstr(2 + (int)(index - first), width / 2 + 3, version);
+                }
+                else {
+                    status = 1;
+                }
+                free(label);
+                free(version);
                 attrset(theme_pair(1));
             }
             if(shown) {
-                mvaddnstr(height - 2, 0, rows[visible[current]].description, width - 1);
+                char *description = axon_display_text(rows[visible[current]].description, width - 1);
+                if(description != NULL) {
+                    mvaddstr(height - 2, 0, description);
+                    free(description);
+                }
+                else {
+                    status = 1;
+                }
             }
             attrset(theme_pair(2));
             mvaddnstr(height - 1, 0, "Enter details | f archive | o orphans | c cache | d check DB | e explicit | b dependency", width - 1);
@@ -282,8 +306,9 @@ int axon_terminal(const axon_config_t *config)
 
             else if(key == '\n' && shown) {
                 row_t *row = &rows[visible[current]];
-                printf("%s%s %s\n%s%s\n", axon_color(stdout, AXON_BLUE), row->target,
-                       row->version, row->description, axon_color(stdout, AXON_RESET));
+                fputs(axon_color(stdout, AXON_BLUE), stdout);
+                axon_fprintf(stdout, "%s %s\n%s\n", row->target, row->version, row->description);
+                fputs(axon_color(stdout, AXON_RESET), stdout);
             }
 
             else if(key == 'f') {
@@ -325,5 +350,5 @@ int axon_terminal(const axon_config_t *config)
     }
     clear_rows(rows, count);
     endwin();
-    return(status);
+    return(axon_output_failed() || ferror(stdout) || ferror(stderr) ? 1 : status);
 }
