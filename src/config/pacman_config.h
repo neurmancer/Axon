@@ -77,5 +77,7 @@ const axon_config_options_t *axon_config_options(const axon_config_t *config);
 const alpm_list_t *axon_config_repositories(const axon_config_t *config);
 axon_config_result_t axon_config_open(const axon_config_t *config,
                                      axon_alpm_t **core, axon_config_error_t *error);
+axon_config_result_t axon_config_open_readonly(const axon_config_t *config,
+                                     axon_alpm_t **core, axon_config_error_t *error);
 
 #endif

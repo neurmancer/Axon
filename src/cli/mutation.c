@@ -206,7 +206,8 @@ static void report(const axon_operation_result_t *result)
         fprintf(stderr, "axon: %s:%zu: %s\n", result->config_error.file,
                 result->config_error.line, result->config_error.message);
     }
-    for(alpm_list_t *item = result->diagnostics; item; item = item->next) {
+    for(alpm_list_t *item = result->status != AXON_OPERATION_OK ? result->diagnostics : NULL;
+            item; item = item->next) {
         fprintf(stderr, "axon: %s\n", (char *)item->data);
     }
     if(result->status != AXON_OPERATION_OK && result->diagnostics == NULL
@@ -222,6 +223,16 @@ static void report(const axon_operation_result_t *result)
     if(result->cancelled) {
         fputs("axon: operation cancelled\n", stderr);
     }
+    if(result->diagnostics_incomplete) {
+        fputs("axon: some transaction diagnostics could not be retained\n", stderr);
+    }
+    if(result->status != AXON_OPERATION_OK && result->package_phase_completed) {
+        fprintf(stderr, "axon: package processing completed (%zu package operations); transaction reported errors\n",
+                result->completed_packages);
+    }
+    else if(result->status != AXON_OPERATION_OK && result->completed_packages != 0) {
+        fprintf(stderr, "axon: %zu package operations completed before failure\n", result->completed_packages);
+    }
     if(result->status != AXON_OPERATION_OK && result->may_have_changes) {
         fputs("axon: changes may have occurred; no automatic rollback was performed\n", stderr);
     }
@@ -229,7 +240,7 @@ static void report(const axon_operation_result_t *result)
 
 int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
                     int count, char **names, int refresh, int refresh_only,
-                    int allow_downgrade)
+                    int allow_downgrade, int flags)
 {
     axon_privilege_result_t privilege = axon_privilege_check(1);
     if(privilege != AXON_PRIVILEGE_OK) {
@@ -282,7 +293,7 @@ int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
         .event = event, .progress = progress, .download = download,
         .context = (void *)axon_config_options(config), .cancel_requested = &interrupted};
     axon_operation_request_t request = {.kind = kind, .targets = targets,
-        .target_count = (size_t)count, .allow_downgrade = allow_downgrade, .callbacks = callbacks};
+        .target_count = (size_t)count, .flags = flags, .allow_downgrade = allow_downgrade, .callbacks = callbacks};
     if(refresh && !confirm("Refresh repository databases?")) {
         goto declined;
     }

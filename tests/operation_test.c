@@ -2,6 +2,7 @@
 
 #include "operation_internal.h"
 #include "alpm_extra.h"
+#include "alpm_internal.h"
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -36,9 +37,72 @@ axon_privilege_result_t __wrap_axon_privilege_check(int require_root)
 } while(0)
 
 static int fail_cleanup;
+static int commit_log;
+static int cleanup_signal;
+static int allocation_enabled;
+static size_t allocation_count, allocation_failure;
+
+void *__real_malloc(size_t size);
+void *__real_calloc(size_t count, size_t size);
+char *__real_strdup(const char *text);
+alpm_list_t *__real_alpm_list_append(alpm_list_t **list, void *data);
+alpm_list_t *__real_alpm_list_append_strdup(alpm_list_t **list, const char *text);
+
+static int allocation_fails(void)
+{
+    return(allocation_enabled && ++allocation_count == allocation_failure);
+}
+
+void *__wrap_malloc(size_t size)
+{
+    return(allocation_fails() ? NULL : __real_malloc(size));
+}
+
+void *__wrap_calloc(size_t count, size_t size)
+{
+    return(allocation_fails() ? NULL : __real_calloc(count, size));
+}
+
+char *__wrap_strdup(const char *text)
+{
+    return(allocation_fails() ? NULL : __real_strdup(text));
+}
+
+alpm_list_t *__wrap_alpm_list_append(alpm_list_t **list, void *data)
+{
+    return(allocation_fails() ? NULL : __real_alpm_list_append(list, data));
+}
+
+alpm_list_t *__wrap_alpm_list_append_strdup(alpm_list_t **list, const char *text)
+{
+    return(allocation_fails() ? NULL : __real_alpm_list_append_strdup(list, text));
+}
+
+static void emit_log(axon_alpm_t *core, alpm_loglevel_t level, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    alpm_option_get_logcb(core->handle)(alpm_option_get_logcb_ctx(core->handle), level, format, args);
+    va_end(args);
+}
+
+alpm_errno_t __real_axon_alpm_transaction_commit(axon_alpm_t *core, axon_alpm_problem_t *problem);
+alpm_errno_t __wrap_axon_alpm_transaction_commit(axon_alpm_t *core, axon_alpm_problem_t *problem)
+{
+    alpm_errno_t error = __real_axon_alpm_transaction_commit(core, problem);
+    if(commit_log && error == ALPM_ERR_OK) {
+        emit_log(core, commit_log == 1 ? ALPM_LOG_WARNING : ALPM_LOG_ERROR,
+                 "helper fixture exited with status %d\n", 7);
+    }
+    return(error);
+}
 alpm_errno_t __real_axon_alpm_transaction_release(axon_alpm_t *core);
 alpm_errno_t __wrap_axon_alpm_transaction_release(axon_alpm_t *core)
 {
+    if(cleanup_signal) {
+        cleanup_signal = 0;
+        assert(raise(SIGUSR1) == 0);
+    }
     alpm_errno_t error = __real_axon_alpm_transaction_release(core);
     if(fail_cleanup && error == ALPM_ERR_OK) {
         fail_cleanup = 0;
@@ -314,8 +378,8 @@ int main(void)
     };
     struct package packages[] = {
         {.name = "essential", .version = "2-1", .size = 12, .dependency = "helper>=1"},
-        {.name = "helper", .version = "1-1", .size = 5},
-        {.name = "application", .version = "1-1", .size = 15, .dependency = "helper>=1"},
+        {.name = "helper", .version = "1-1", .size = 5, .group = "tools"},
+        {.name = "application", .version = "1-1", .size = 15, .dependency = "helper>=1", .group = "tools"},
         {.name = "substitute", .version = "1-1", .size = 11, .replaces = "legacy"},
         {.name = "ignored", .version = "1-1", .size = 3, .group = "ignored-group"}
     };
@@ -352,6 +416,22 @@ int main(void)
     EXPECT(axon_operation_refresh(config, 0, &result), AXON_OPERATION_PRIVILEGE);
     assert(operation == NULL && access("db/db.lck", F_OK) != 0);
     authorized = 1;
+    allocation_count = allocation_failure = 0;
+    allocation_enabled = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    allocation_enabled = 0;
+    size_t prepare_allocations = allocation_count;
+    release(&operation);
+    for(size_t index = 1; index <= prepare_allocations; index++) {
+        allocation_count = 0;
+        allocation_failure = index;
+        allocation_enabled = 1;
+        axon_operation_status_t status = axon_operation_prepare(config, &request, &operation, &result);
+        allocation_enabled = 0;
+        assert(status != AXON_OPERATION_OK && operation == NULL && !result.may_have_changes);
+        assert(access("db/db.lck", F_OK) != 0);
+    }
+    printf("Operation prepare allocation failures passed (%zu points).\n", prepare_allocations);
     EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
     const axon_operation_plan_t *plan = axon_operation_plan(operation);
     assert(plan->count == 4 && plan->installed_delta == 46 && plan->download_bytes == 0);
@@ -367,6 +447,49 @@ int main(void)
     assert(strcmp(plan->entries[0].new_version, "1-1") == 0);
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_STATE);
     release(&operation);
+
+    targets[0] = (axon_operation_target_t){.name = locals[0].path};
+    request = (axon_operation_request_t){.kind = AXON_OPERATION_FILE, .targets = targets,
+        .target_count = 1, .flags = safe_flags};
+    for(int mode = 0; mode < 3; mode++) {
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+        approved = approval(operation);
+        commit_log = mode;
+        EXPECT(axon_operation_commit(operation, &approved, &result),
+               mode == 2 ? AXON_OPERATION_EXECUTION : AXON_OPERATION_OK);
+        assert(result.committed && result.package_phase_completed && result.completed_packages == 1);
+        assert(result.execution_errors == (size_t)(mode == 2) && !result.diagnostics_incomplete);
+        if(mode != 0) {
+            int found = 0;
+            for(alpm_list_t *item = result.diagnostics; item != NULL; item = item->next) {
+                found |= strstr(item->data, "helper fixture exited with status 7") != NULL;
+            }
+            assert(found);
+        }
+        release(&operation);
+    }
+    commit_log = 0;
+
+    size_t commit_allocations = 0;
+    for(size_t index = 0; index <= commit_allocations; index++) {
+        EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+        approved = approval(operation);
+        commit_log = 2;
+        allocation_count = 0;
+        allocation_failure = index;
+        allocation_enabled = 1;
+        EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_EXECUTION);
+        allocation_enabled = 0;
+        if(index == 0) {
+            commit_allocations = allocation_count;
+        }
+        else {
+            assert(result.diagnostics_incomplete);
+        }
+        assert(result.completed_packages == 1 && result.package_phase_completed && result.committed);
+        release(&operation);
+    }
+    commit_log = 0;
 
     targets[0] = (axon_operation_target_t){.name = "essential"};
     request = (axon_operation_request_t){.kind = AXON_OPERATION_REMOVE, .targets = targets,
@@ -398,6 +521,14 @@ int main(void)
 
     EXPECT(axon_operation_refresh(config, 1, &result), AXON_OPERATION_OK);
     assert(result.refreshed);
+    axon_operation_target_t group_targets[] = {{.name = "tools"}, {.name = "helper"}};
+    axon_operation_request_t group_request = {.kind = AXON_OPERATION_INSTALL,
+        .targets = group_targets, .target_count = 2, .flags = safe_flags};
+    EXPECT(axon_operation_prepare(config, &group_request, &operation, &result), AXON_OPERATION_OK);
+    assert(axon_operation_plan(operation)->count == 2);
+    assert(entry(axon_operation_plan(operation), "helper")->explicit_target);
+    assert(entry(axon_operation_plan(operation), "application")->explicit_target);
+    release(&operation);
     file = fopen("pacman.conf", "a");
     assert(file != NULL && fputs("[options]\nIgnorePkg = essential\n", file) >= 0);
     assert(fclose(file) == 0);
@@ -587,6 +718,7 @@ int main(void)
     observer.cancel_event = ALPM_EVENT_PACKAGE_OPERATION_DONE;
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_CANCELLED);
     assert(result.cancelled && result.may_have_changes && !result.committed && observer.progress);
+    assert(result.completed_packages == 1);
     release(&operation);
     stop = 0;
     observer.cancel_event = 0;
@@ -594,6 +726,17 @@ int main(void)
     assert(axon_config_open(config, &check, &config_error) == AXON_CONFIG_OK);
     assert(axon_alpm_local_package(check, "cancel-second", &package) == ALPM_ERR_PKG_NOT_FOUND);
     assert(axon_alpm_release(&check) == 0);
+
+    request.target_count = 1;
+    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    approved = approval(operation);
+    cleanup_signal = 1;
+    EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_CANCELLED);
+    assert(result.cancelled && result.package_phase_completed && result.completed_packages == 1);
+    assert(result.cleanup_error == ALPM_ERR_OK && access("db/db.lck", F_OK) != 0);
+    stop = 0;
+    release(&operation);
+    request.target_count = 2;
 
     EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
     pid_t child = fork();

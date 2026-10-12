@@ -28,7 +28,8 @@ typedef enum {
     AXON_OPERATION_STATE,
     AXON_OPERATION_QUESTION,
     AXON_OPERATION_CANCELLED,
-    AXON_OPERATION_OVERFLOW
+    AXON_OPERATION_OVERFLOW,
+    AXON_OPERATION_EXECUTION
 } axon_operation_status_t;
 
 typedef struct {
@@ -121,6 +122,10 @@ typedef struct {
     int may_have_changes;
     int refreshed;
     int cancelled;
+    size_t completed_packages;
+    size_t execution_errors;
+    int package_phase_completed;
+    int diagnostics_incomplete;
 } axon_operation_result_t;
 
 axon_operation_status_t axon_operation_prepare(const axon_config_t *config,

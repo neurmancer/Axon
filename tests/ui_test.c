@@ -159,7 +159,7 @@ int main(void)
     send_keys("\n");
     expect("fixture");
     send_keys("q");
-    finish(0);
+    finish(1);
     axon_alpm_t *core = NULL;
     alpm_pkg_t *package = NULL;
     assert(axon_config_open(config, &core, &error) == AXON_CONFIG_OK);
@@ -176,7 +176,7 @@ int main(void)
     send_keys("\n");
     expect("fixture");
     send_keys("q");
-    finish(0);
+    finish(1);
     start(config, 5, 30);
     expect("Resize terminal");
     struct winsize size = {.ws_row = 24, .ws_col = 100};

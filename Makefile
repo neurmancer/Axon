@@ -8,18 +8,18 @@ CFLAGS += -std=c11 -Wall -Wextra -Wpedantic
 UI_CFLAGS = $(shell $(PKG_CONFIG) --cflags ncursesw)
 UI_LIBS = $(shell $(PKG_CONFIG) --libs ncursesw)
 src/ui/terminal.o: CPPFLAGS += $(UI_CFLAGS)
-ALPM_LIBS = $(shell $(PKG_CONFIG) --libs libalpm)
+ALPM_LIBS = $(shell $(PKG_CONFIG) --libs libalpm libarchive)
 TEST_FLAGS = $(shell $(PKG_CONFIG) --cflags libarchive)
 TEST_LIBS = $(shell $(PKG_CONFIG) --libs libarchive)
 OBJECTS = src/alpm/alpm_core.o src/alpm/alpm_extra.o \
           src/config/pacman_config.o src/config/config_alpm.o src/security/privilege.o \
-          src/core/operation.o src/core/plan.o src/core/callbacks.o src/core/maintenance.o
+          src/core/operation.o src/core/plan.o src/core/callbacks.o src/core/maintenance.o src/core/inspection.o
 
 .PHONY: all test clean
 
 all: axon
 
-axon: src/cli/main.o src/cli/mutation.o src/cli/maintenance.o src/ui/terminal.o libaxon-alpm.a
+axon: src/cli/query.o src/cli/main.o src/cli/mutation.o src/cli/maintenance.o src/ui/terminal.o libaxon-alpm.a
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(ALPM_LIBS) $(UI_LIBS) $(LDLIBS) -o $@
 
 libaxon-alpm.a: $(OBJECTS)
@@ -46,7 +46,7 @@ tests/privilege_test.out: tests/privilege_test.c libaxon-alpm.a
 		-Wl,--wrap=getresuid,--wrap=getresgid,--wrap=getauxval -o $@
 
 tests/operation_test.out: tests/operation_test.c libaxon-alpm.a
-	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -Wl,--wrap=axon_privilege_check,--wrap=axon_alpm_transaction_release -o $@
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -Wl,--wrap=axon_privilege_check,--wrap=axon_alpm_transaction_release,--wrap=axon_alpm_transaction_commit,--wrap=malloc,--wrap=calloc,--wrap=strdup,--wrap=alpm_list_append,--wrap=alpm_list_append_strdup -o $@
 
 tests/download_driver.out: tests/download_driver.c libaxon-alpm.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(LDLIBS) -Wl,--wrap=axon_privilege_check -o $@
@@ -55,8 +55,12 @@ tests/privileged_driver.out: tests/download_driver.c libaxon-alpm.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG -DAXON_TEST_PRODUCTION $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(LDLIBS) -o $@
 
 .PHONY: test-privileged
-test-privileged: axon tests/privileged_driver.out
+tests/helper_failure_test.out: tests/helper_failure_test.c libaxon-alpm.a axon
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -lutil -o $@
+
+test-privileged: axon tests/privileged_driver.out tests/helper_failure_test.out
 	python3 tests/privileged_test.py --cli
+	unshare --user --map-root-user --mount --pid --fork --net ./tests/helper_failure_test.out
 
 tests/disk_full.so: tests/disk_full.c
 	$(CC) $(CFLAGS) -fPIC -shared $(LDFLAGS) $< -ldl -o $@
@@ -84,10 +88,14 @@ test: tests/ui_test.out tests/maintenance_test.out tests/disk_full.so tests/down
 	./tests/privilege_test.out
 	./tests/operation_test.out
 	./tests/maintenance_test.out
+	./tests/inspection_test.out
 	./tests/ui_test.out
 	python3 tests/download_test.py
 
 clean:
+	$(RM) tests/inspection_test.out
+	$(RM) src/cli/query.o src/cli/query.d
+	$(RM) tests/helper_failure_test.out
 	$(RM) src/cli/maintenance.o src/cli/maintenance.d src/ui/terminal.o src/ui/terminal.d
 	$(RM) axon src/cli/main.o src/cli/main.d src/cli/mutation.o src/cli/mutation.d
 	$(RM) tests/maintenance_test.out tests/ui_test.out tests/package_test.out
@@ -96,7 +104,7 @@ clean:
 	$(RM) tests/operation_test.out tests/download_driver.out tests/privileged_driver.out tests/disk_full.so
 	$(RM) $(OBJECTS) $(OBJECTS:.o=.d) libaxon-alpm.a tests/alpm_extra_test.out tests/config_test.out tests/config_alloc_test.out
 
--include $(OBJECTS:.o=.d) src/cli/main.d src/cli/mutation.d src/cli/maintenance.d src/ui/terminal.d
+-include src/cli/query.d $(OBJECTS:.o=.d) src/cli/main.d src/cli/mutation.d src/cli/maintenance.d src/ui/terminal.d
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -142,7 +150,7 @@ package: release-check
 	axon_size=$$(du -sb "$$axon_stage" | cut -f1); \
 	{ printf '%s\n' 'pkgname = axon' 'pkgbase = axon' 'pkgver = $(VERSION)-$(PKGREL)' \
 	'pkgdesc = NeurOS package manager with CLI and terminal interface' 'arch = $(CARCH)' \
-	'license = MIT' 'depend = pacman' 'depend = ncurses' 'depend = glibc'; \
+	'license = MIT' 'depend = pacman' 'depend = ncurses' 'depend = glibc' 'depend = libarchive'; \
 	printf 'depend = libalpm.so=16-%s\n' "$$(getconf LONG_BIT)"; \
 	printf 'builddate = %s\nsize = %s\n' '$(SOURCE_DATE_EPOCH)' "$$axon_size"; \
 	} > "$$axon_stage/.PKGINFO"; \
@@ -166,9 +174,15 @@ test-c: tests/alpm_extra_test.out tests/config_test.out tests/config_alloc_test.
 	./tests/privilege_test.out
 	./tests/operation_test.out
 	./tests/maintenance_test.out
+	./tests/inspection_test.out
 	./tests/ui_test.out
 
 sanitize:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 	$(MAKE) test-c CC=clang CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'
+
+tests/inspection_test.out: tests/inspection_test.c libaxon-alpm.a axon
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $< libaxon-alpm.a $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -o $@
+
+test test-c: tests/inspection_test.out

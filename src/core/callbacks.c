@@ -3,6 +3,20 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+static void retain_message(axon_operation_result_t *result, const char *message)
+{
+    size_t length = strlen(message) + 1;
+    char *copy = malloc(length);
+    if(copy != NULL) {
+        memcpy(copy, message, length);
+    }
+    if(copy == NULL || alpm_list_append(&result->diagnostics, copy) == NULL) {
+        free(copy);
+        result->diagnostics_incomplete = 1;
+    }
+}
 
 int axon_operation_poll(axon_operation_t *operation)
 {
@@ -76,11 +90,29 @@ void axon_operation_question(void *context, alpm_question_t *question)
 static void event(void *context, alpm_event_t *value)
 {
     axon_operation_t *operation = context;
+    if(value->type == ALPM_EVENT_TRANSACTION_START || value->type == ALPM_EVENT_HOOK_START) {
+        operation->execution_started = 1;
+    }
     if(value->type == ALPM_EVENT_TRANSACTION_START) {
         operation->transaction_started = 1;
     }
     if(value->type == ALPM_EVENT_TRANSACTION_DONE) {
         operation->transaction_started = 0;
+    }
+    axon_operation_result_t *result = operation->commit_result;
+    if(result != NULL) {
+        if(value->type == ALPM_EVENT_TRANSACTION_DONE) {
+            result->package_phase_completed = 1;
+        }
+        if(value->type == ALPM_EVENT_PACKAGE_OPERATION_DONE) {
+            result->completed_packages++;
+        }
+        if(value->type == ALPM_EVENT_SCRIPTLET_INFO && value->scriptlet_info.line != NULL) {
+            retain_message(result, value->scriptlet_info.line);
+        }
+        if(value->type == ALPM_EVENT_HOOK_RUN_START && value->hook_run.name != NULL) {
+            retain_message(result, value->hook_run.name);
+        }
     }
     if(operation->callbacks.event != NULL) {
         operation->callbacks.event(operation->callbacks.context, value);
@@ -110,10 +142,14 @@ static void download(void *context, const char *name, alpm_download_event_type_t
 static void log_message(void *context, alpm_loglevel_t level, const char *format, va_list args)
 {
     axon_operation_t *operation = context;
-    if(operation->cleanup_result != NULL && (level & (ALPM_LOG_ERROR | ALPM_LOG_WARNING))) {
-        axon_operation_result_t *result = operation->cleanup_result;
-        if(result->cleanup_error == ALPM_ERR_OK) {
+    axon_operation_result_t *result = operation->cleanup_result != NULL
+        ? operation->cleanup_result : operation->commit_result;
+    if(result != NULL && (level & (ALPM_LOG_ERROR | ALPM_LOG_WARNING))) {
+        if(operation->cleanup_result != NULL && result->cleanup_error == ALPM_ERR_OK) {
             result->cleanup_error = ALPM_ERR_SYSTEM;
+        }
+        if(operation->commit_result != NULL && operation->execution_started && (level & ALPM_LOG_ERROR)) {
+            result->execution_errors++;
         }
         va_list copy;
         va_copy(copy, args);
@@ -126,7 +162,11 @@ static void log_message(void *context, alpm_loglevel_t level, const char *format
             va_end(copy);
             if(alpm_list_append(&result->diagnostics, message) == NULL) {
                 free(message);
+                result->diagnostics_incomplete = 1;
             }
+        }
+        else {
+            result->diagnostics_incomplete = 1;
         }
     }
     if(operation->callbacks.log != NULL) {

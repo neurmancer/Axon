@@ -4,5 +4,5 @@
 
 int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
                     int count, char **names, int refresh, int refresh_only,
-                    int allow_downgrade);
+                    int allow_downgrade, int flags);
 #endif

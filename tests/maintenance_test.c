@@ -64,6 +64,8 @@ static void local(const char *name, int reason, const char *extra)
     snprintf(path, sizeof(path), "db/local/%s-1-1/desc", name);
     snprintf(text, sizeof(text), "%%NAME%%\n%s\n\n%%VERSION%%\n1-1\n\n%%REASON%%\n%d\n\n%%DESC%%\nFixture\n\n%s", name, reason, extra);
     write_file(path, text);
+    snprintf(path, sizeof(path), "db/local/%s-1-1/files", name);
+    write_file(path, "%FILES%\n\n");
 }
 
 static axon_config_t *configuration(const char *method)

@@ -293,17 +293,23 @@ int axon_terminal(const axon_config_t *config)
                 if(fgets(path, sizeof(path), stdin) != NULL && strchr(path, '\n') != NULL) {
                     path[strcspn(path, "\n")] = '\0';
                     char *archive = path;
-                    axon_cli_mutate(config, AXON_OPERATION_FILE, 1, &archive, 0, 0, 0);
+                    if(axon_cli_mutate(config, AXON_OPERATION_FILE, 1, &archive, 0, 0, 0, 0) != 0) {
+                        status = 1;
+                    }
                 }
             }
 
             else if(key == 'u') {
-                axon_cli_mutate(config, AXON_OPERATION_UPGRADE, 0, NULL, 1, 0, 0);
+                if(axon_cli_mutate(config, AXON_OPERATION_UPGRADE, 0, NULL, 1, 0, 0, 0) != 0) {
+                    status = 1;
+                }
             }
 
             else if(selected && (key == 'i' || key == 'r')) {
-                axon_cli_mutate(config, remote ? AXON_OPERATION_INSTALL : AXON_OPERATION_REMOVE,
-                                selected, targets, 0, 0, 0);
+                if(axon_cli_mutate(config, remote ? AXON_OPERATION_INSTALL : AXON_OPERATION_REMOVE,
+                                  selected, targets, 0, 0, 0, 0) != 0) {
+                    status = 1;
+                }
             }
             free(targets);
             fputs("Press Enter to return to the package list.", stdout);

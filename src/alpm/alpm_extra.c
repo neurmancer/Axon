@@ -394,7 +394,15 @@ alpm_errno_t axon_alpm_search(axon_alpm_t *core, int sync,
             }
         }
 
-        if(alpm_db_search(item->data, patterns, &matches) < 0) {
+        if(patterns == NULL) {
+            alpm_list_t *cache = alpm_db_get_pkgcache(item->data);
+            matches = alpm_list_copy(cache);
+            if(cache != NULL && matches == NULL) {
+                alpm_list_free(results);
+                return(ALPM_ERR_MEMORY);
+            }
+        }
+        else if(alpm_db_search(item->data, patterns, &matches) < 0) {
             alpm_errno_t error = alpm_errno(core->handle);
             alpm_list_free(matches);
             alpm_list_free(results);

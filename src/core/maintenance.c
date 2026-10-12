@@ -40,7 +40,12 @@ alpm_errno_t axon_maintenance_check(axon_alpm_t *core,
         return(ALPM_ERR_HANDLE_LOCK);
     }
     if(errno != ENOENT) {
+        message(context, "Cannot inspect database lock: check database directory permissions; no repair performed.");
         return(ALPM_ERR_SYSTEM);
+    }
+    alpm_errno_t records = axon_maintenance_records(core, 1, message, context);
+    if(records != ALPM_ERR_OK) {
+        return(records);
     }
     alpm_db_t *local = alpm_get_localdb(handle);
     if(local == NULL || alpm_db_get_valid(local) < 0) {

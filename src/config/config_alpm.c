@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "config_internal.h"
 #include "alpm_extra.h"
 #include "alpm_internal.h"
@@ -5,6 +6,32 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+axon_config_result_t axon_config_open_readonly(const axon_config_t *config,
+                                     axon_alpm_t **core, axon_config_error_t *error)
+{
+    if(config == NULL || core == NULL || *core != NULL) {
+        return(axon_config_fail(config, NULL, error, AXON_CONFIG_ARGUMENT,
+                                "pass a parsed configuration and an initially NULL context"));
+    }
+    int directory = open(config->options.db_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int version = directory < 0 ? -1 : openat(directory, "local/ALPM_DB_VERSION", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    struct stat info;
+    int valid = version >= 0 && fstat(version, &info) == 0 && S_ISREG(info.st_mode);
+    if(version >= 0) {
+        close(version);
+    }
+    if(directory >= 0) {
+        close(directory);
+    }
+    if(!valid) {
+        return(axon_config_fail(config, &config->options.db_path, error, AXON_CONFIG_IO,
+            "database or local/ALPM_DB_VERSION is missing or unreadable; inspection will not initialize or repair it"));
+    }
+    return(axon_config_open(config, core, error));
+}
 
 static axon_config_result_t backend_error(const axon_config_t *config,
                                           const void *target, axon_config_error_t *error,

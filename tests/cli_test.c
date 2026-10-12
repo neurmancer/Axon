@@ -105,6 +105,7 @@ int main(void)
                "%NAME%\nlocal-fixture\n\n%VERSION%\n1-1\n\n"
                "%DESC%\nLocal test package\n\n%ARCH%\nany\n\n"
                "%SIZE%\n42\n\n%REASON%\n0\n\n");
+    write_file("db/local/local-fixture-1-1/files", "%FILES%\n\n");
     repository();
     char config[2048];
     snprintf(config, sizeof(config), "[options]\nRootDir = %s\nDBPath = %s/db\n"
@@ -132,15 +133,15 @@ int main(void)
     char *invalid_config[] = {binary, "--config", "invalid.conf", "-Q", NULL};
     run(invalid_config, 1, "invalid.conf:2:");
     char *no_command[] = {binary, NULL};
-    run(no_command, 2, "choose -Q");
+    run(no_command, 2, "incompatible operation");
     char *unsafe[] = {binary, "-Sy", "package", NULL};
-    run(unsafe, 2, "choose -Q");
+    run(unsafe, 2, "incompatible operation");
     char *remove[] = {binary, "-Ri", "package", NULL};
-    run(remove, 2, "choose -Q");
+    run(remove, 2, "incompatible operation");
     char *incompatible[] = {binary, "-QS", NULL};
-    run(incompatible, 2, "choose -Q");
-    char *no_name[] = {binary, "-Qi", NULL};
-    run(no_name, 2, "choose -Q");
+    run(incompatible, 2, "incompatible operation");
+    char *no_name[] = {binary, "--config", "pacman.conf", "-Qi", NULL};
+    run(no_name, 0, "local-fixture");
     char *no_path[] = {binary, "--config", NULL};
     run(no_path, 2, "missing option value");
     char *depends[] = {binary, "--config", "pacman.conf", "--depends", "local-fixture", NULL};
@@ -152,9 +153,9 @@ int main(void)
     char *check[] = {binary, "--config", "pacman.conf", "--check-db", NULL};
     run(check, 0, "no repair performed");
     char *combined[] = {binary, "--orphans", "-Q", NULL};
-    run(combined, 2, "cannot be combined");
+    run(combined, 2, "incompatible operation");
     char *missing_targets[] = {binary, "--asdeps", NULL};
-    run(missing_targets, 2, "require package names");
+    run(missing_targets, 2, "incompatible operation");
     char *multiple[] = {binary, "--orphans", "--check-db", NULL};
     run(multiple, 2, "choose one maintenance operation");
     if(getuid() != 0) {

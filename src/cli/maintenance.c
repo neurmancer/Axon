@@ -98,7 +98,8 @@ static int maintenance(const axon_config_t *config, int action, int count, char 
     }
     axon_alpm_t *core = NULL;
     axon_config_error_t config_error;
-    if(axon_config_open(config, &core, &config_error) != AXON_CONFIG_OK) {
+    if((action == AXON_CHECK_DATABASE ? axon_config_open_readonly(config, &core, &config_error)
+                                     : axon_config_open(config, &core, &config_error)) != AXON_CONFIG_OK) {
         message(NULL, config_error.message);
         return(1);
     }

@@ -41,14 +41,15 @@ jobs:
         run: |
           set -o pipefail
           runuser -u axonci -- make clean
-          runuser -u axonci -- make test test-package tests/privileged_driver.out CC="$AXON_COMPILER" CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g' 2>&1 | tee regression.log
+          runuser -u axonci -- make test test-package tests/privileged_driver.out tests/helper_failure_test.out CC="$AXON_COMPILER" CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g' 2>&1 | tee regression.log
       - name: Privileged regressions in isolated namespaces and chroots
-        env:
-          AXON_COMPILER: ${{ matrix.compiler }}
         run: |
           set -o pipefail
+          test "$(id -u)" -eq 0
+          test -x axon && test -x tests/privileged_driver.out && test -x tests/helper_failure_test.out
           unshare --user --map-root-user --mount --pid --fork --net true 2>&1 | tee privileged.log
-          make test-privileged CC="$AXON_COMPILER" CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g' 2>&1 | tee -a privileged.log
+          python3 tests/privileged_test.py --cli 2>&1 | tee -a privileged.log
+          unshare --user --map-root-user --mount --pid --fork --net ./tests/helper_failure_test.out 2>&1 | tee -a privileged.log
       - name: Preserve results and packages
         if: always()
         uses: actions/upload-artifact@v4

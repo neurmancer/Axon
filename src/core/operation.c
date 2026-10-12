@@ -124,6 +124,9 @@ static void finish(axon_operation_t *operation, axon_operation_result_t *result)
         }
         diagnostic(result, "cleanup: %s", alpm_strerror(result->cleanup_error));
     }
+    if(result->may_have_changes) {
+        cancellation(operation, result);
+    }
 }
 
 static void destroy(axon_operation_t *operation)
@@ -215,8 +218,49 @@ static alpm_errno_t queue(axon_operation_t *operation, axon_operation_kind_t kin
     alpm_errno_t error = kind == AXON_OPERATION_FILE
         ? axon_alpm_load(operation->core, target->name, &package)
         : resolve(operation->core, target, &package);
+    if(error == ALPM_ERR_PKG_NOT_FOUND && kind == AXON_OPERATION_INSTALL) {
+        const alpm_list_t *repositories = NULL;
+        error = axon_alpm_repositories(operation->core, &repositories);
+        int found = 0;
+        for(const alpm_list_t *item = repositories; error == ALPM_ERR_OK && item; item = item->next) {
+            alpm_db_t *database = item->data;
+            const char *name = alpm_db_get_name(database);
+            int usage;
+            if(target->repository != NULL && strcmp(target->repository, name) != 0) {
+                continue;
+            }
+            if(alpm_db_get_usage(database, &usage) < 0) {
+                return(alpm_errno(alpm_db_get_handle(database)));
+            }
+            if(target->repository == NULL && !(usage & ALPM_DB_USAGE_INSTALL)) {
+                continue;
+            }
+            alpm_group_t *group = alpm_db_get_group(database, target->name);
+            if(group == NULL) {
+                continue;
+            }
+            found = 1;
+            for(alpm_list_t *member = group->packages; member; member = member->next) {
+                if(axon_operation_poll(operation)) {
+                    return(ALPM_ERR_TRANS_ABORT);
+                }
+                axon_operation_target_t expanded = {.name = alpm_pkg_get_name(member->data), .repository = name};
+                error = queue(operation, kind, &expanded);
+                if(error != ALPM_ERR_OK) {
+                    break;
+                }
+            }
+        }
+        return(error != ALPM_ERR_OK ? error : found ? ALPM_ERR_OK : ALPM_ERR_PKG_NOT_FOUND);
+    }
     if(error != ALPM_ERR_OK) {
         return(error);
+    }
+    if(alpm_list_find_str(operation->explicit_names, alpm_pkg_get_name(package)) != NULL) {
+        if(kind == AXON_OPERATION_FILE) {
+            alpm_pkg_free(package);
+        }
+        return(ALPM_ERR_OK);
     }
     if(alpm_pkg_should_ignore(alpm_pkg_get_handle(package), package)) {
         alpm_question_t value = {.install_ignorepkg = {
@@ -443,7 +487,9 @@ axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
     result->may_have_changes = operation->plan.count != 0;
     operation->busy = 1;
     operation->committing = 1;
+    operation->commit_result = result;
     error = axon_alpm_transaction_commit(operation->core, &problem);
+    operation->commit_result = NULL;
     operation->committing = 0;
     if(error != ALPM_ERR_OK) {
         backend_problem(result, error, &problem);
@@ -451,6 +497,12 @@ axon_operation_status_t axon_operation_commit(axon_operation_t *operation,
 
     else {
         result->committed = 1;
+        if(result->execution_errors != 0) {
+            result->status = AXON_OPERATION_EXECUTION;
+        }
+        else if(result->diagnostics_incomplete) {
+            result->status = AXON_OPERATION_MEMORY;
+        }
     }
     axon_alpm_problem_clear(&problem);
     if(operation->question) {

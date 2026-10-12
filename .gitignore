@@ -61,5 +61,6 @@ dkms.conf
 
 # NOTES
 NOTES.md 
+SPECIAL.md
 
 /build/

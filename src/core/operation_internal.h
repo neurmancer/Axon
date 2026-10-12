@@ -17,11 +17,13 @@ struct axon_operation {
     int busy;
     int committing;
     int transaction_started;
+    int execution_started;
     int cancelled;
     int interrupting;
     int interrupted;
     axon_operation_callbacks_t callbacks;
     axon_operation_result_t *cleanup_result;
+    axon_operation_result_t *commit_result;
     alpm_errno_t plan_error;
 };
 
