@@ -289,7 +289,8 @@ int axon_cli_mutate(const axon_config_t *config, axon_operation_kind_t kind,
     }
     for(int index = 0; index < count; index++) {
         targets[index].name = names[index];
-        if(kind == AXON_OPERATION_INSTALL && strchr(names[index], '/') != NULL) {
+        if((kind == AXON_OPERATION_INSTALL || kind == AXON_OPERATION_UPGRADE)
+                && strchr(names[index], '/') != NULL) {
             qualified[index] = strdup(names[index]);
             if(qualified[index] == NULL) {
                 fputs("axon: out of memory\n", stderr);

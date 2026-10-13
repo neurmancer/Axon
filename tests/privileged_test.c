@@ -150,7 +150,7 @@ static void inside(void)
     backend("install", "fixture", 0);
     assert(access("/usr/share/fixture", F_OK) != 0 && unlink("/hooks/fail.hook") == 0);
     write_text("/repo/bad.pkg.tar", "broken archive"); backend("file", "/repo/bad.pkg.tar", 0);
-    const char *invalid[][3] = {{"-Sy", "fixture", NULL}, {"-Syu", "fixture", NULL}, {"-R", NULL, NULL},
+    const char *invalid[][3] = {{"-Sy", "fixture", NULL}, {"-Syu", "--file", "fixture"}, {"-R", NULL, NULL},
         {"-U", NULL, NULL}, {"-QS", NULL, NULL}, {"-Ssi", "fixture", NULL}, {"-R", "--allow-downgrade", "fixture"},
         {"--noconfirm", "-S", "fixture"}};
     for(size_t index = 0; index < sizeof(invalid) / sizeof(*invalid); index++) {
@@ -172,7 +172,7 @@ static void inside(void)
     cli("-R", "fixture", NULL, "y\ny\n", 0); assert(access("/usr/share/fixture", F_OK) != 0);
     cli("-U", "/repo/fixture-1-1.pkg.tar", NULL, "y\n", 0);
     assert(contents("/usr/share/fixture", "1-1"));
-    cli("-Syu", NULL, NULL, "y\ny\n", 0);
+    cli("-Syu", "fixture", NULL, "y\ny\n", 0);
     assert(strstr(output, "upgrade fixture: 1-1 -> 2-1") && contents("/usr/share/fixture", "2-1"));
     cli("-U", "/repo/fixture-1-1.pkg.tar", NULL, "y\n", 1); assert(contents("/usr/share/fixture", "2-1"));
     cli("-U", "--allow-downgrade", "/repo/fixture-1-1.pkg.tar", "y\ny\n", 0);

@@ -129,8 +129,7 @@ sudo ./axon --clean-cache        # Review removals under CleanMethod
 ```
 
 `-Su` upgrades using cached databases; `-Sy` only refreshes them. Prefer `-Syu`
-for system updates. Refresh/upgrade commands take no package targets, so
-`-Sy PACKAGE` and `-Syu PACKAGE` are rejected. A second `-y` forces refresh.
+for system updates. A second `-y` forces refresh.
 Downgrades require `--allow-downgrade` and a separate confirmation. Protected
 removals require approval for each exact package. There is no `--noconfirm`.
 `-S GROUP` expands all eligible group members into the approval plan; numeric

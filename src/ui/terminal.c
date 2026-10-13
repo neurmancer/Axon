@@ -5,6 +5,7 @@
 #include <limits.h>
 #include "../cli/mutation.h"
 #include "../cli/maintenance.h"
+#include "../cli/query.h"
 #include "alpm_extra.h"
 
 #include <curses.h>
@@ -311,10 +312,20 @@ int axon_terminal(const axon_config_t *config)
             }
 
             else if(key == '\n' && shown) {
-                row_t *row = &rows[visible[current]];
-                fputs(axon_color(stdout, AXON_BLUE), stdout);
-                axon_fprintf(stdout, "%s %s\n%s\n", row->target, row->version, row->description);
-                fputs(axon_color(stdout, AXON_RESET), stdout);
+                axon_alpm_t *core = NULL;
+                axon_config_error_t error;
+                axon_query_t query = {.sync = remote, .info = 1};
+                char *target = rows[visible[current]].target;
+                if(axon_config_open_readonly(config, &core, &error) != AXON_CONFIG_OK) {
+                    axon_fprintf(stderr, "axon: %s\n", error.message);
+                    status = 1;
+                }
+                else if(axon_cli_query(core, &query, 1, &target) != 0) {
+                    status = 1;
+                }
+                if(axon_alpm_release(&core) != 0) {
+                    status = 1;
+                }
             }
 
             else if(key == 'f') {

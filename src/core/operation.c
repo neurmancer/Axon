@@ -151,7 +151,7 @@ static int validate(const axon_operation_request_t *request)
             || (request->target_count != 0 && request->targets == NULL)) {
         return(0);
     }
-    if((request->kind == AXON_OPERATION_UPGRADE) != (request->target_count == 0)) {
+    if(request->kind != AXON_OPERATION_UPGRADE && request->target_count == 0) {
         return(0);
     }
     int allowed = ALPM_TRANS_FLAG_NOHOOKS | ALPM_TRANS_FLAG_NOSCRIPTLET;
@@ -175,7 +175,8 @@ static int validate(const axon_operation_request_t *request)
     for(size_t index = 0; index < request->target_count; index++) {
         const axon_operation_target_t *target = &request->targets[index];
         if(target->name == NULL || target->name[0] == '\0'
-                || (target->repository != NULL && (request->kind != AXON_OPERATION_INSTALL
+                || (target->repository != NULL && ((request->kind != AXON_OPERATION_INSTALL
+                                                    && request->kind != AXON_OPERATION_UPGRADE)
                                                    || target->repository[0] == '\0'))) {
             return(0);
         }
@@ -183,32 +184,101 @@ static int validate(const axon_operation_request_t *request)
     return(1);
 }
 
-static alpm_errno_t resolve(axon_alpm_t *core, const axon_operation_target_t *target,
+static alpm_errno_t resolve(axon_operation_t *operation, const axon_operation_target_t *target,
                             alpm_pkg_t **package)
 {
-    if(target->repository != NULL) {
-        return(axon_alpm_sync_package(core, target->repository, target->name, package));
-    }
+    axon_alpm_t *core = operation->core;
     const alpm_list_t *repositories = NULL;
     alpm_errno_t error = axon_alpm_repositories(core, &repositories);
     if(error != ALPM_ERR_OK) {
         return(error);
     }
+    alpm_depend_t *dependency = alpm_dep_from_string(target->name);
+    if(dependency == NULL) {
+        return(ALPM_ERR_MEMORY);
+    }
+    alpm_list_t *providers = NULL;
+    int repository_found = target->repository == NULL;
     for(const alpm_list_t *item = repositories; item; item = item->next) {
-        alpm_db_t *database = item->data;
-        int usage;
-        if(alpm_db_get_usage(database, &usage) < 0) {
-            return(alpm_errno(alpm_db_get_handle(database)));
+        if(axon_operation_poll(operation)) {
+            error = ALPM_ERR_TRANS_ABORT;
+            goto done;
         }
-        if(!(usage & ALPM_DB_USAGE_INSTALL)) {
+        alpm_db_t *database = item->data;
+        const char *name = alpm_db_get_name(database);
+        if(target->repository != NULL && strcmp(target->repository, name) != 0) {
             continue;
         }
-        error = axon_alpm_sync_package(core, alpm_db_get_name(database), target->name, package);
-        if(error != ALPM_ERR_PKG_NOT_FOUND) {
-            return(error);
+        repository_found = 1;
+        int usage;
+        if(alpm_db_get_usage(database, &usage) < 0) {
+            error = alpm_errno(alpm_db_get_handle(database));
+            goto done;
+        }
+        if(target->repository == NULL && !(usage & ALPM_DB_USAGE_INSTALL)) {
+            continue;
+        }
+        error = axon_alpm_sync_package(core, name, dependency->name, package);
+        if(error != ALPM_ERR_OK && error != ALPM_ERR_PKG_NOT_FOUND) {
+            goto done;
+        }
+        alpm_list_t single = {.data = *package};
+        if(*package != NULL && alpm_find_satisfier(&single, target->name) != NULL) {
+            error = ALPM_ERR_OK;
+            goto done;
+        }
+        *package = NULL;
+        for(alpm_list_t *candidate = alpm_db_get_pkgcache(database); candidate; candidate = candidate->next) {
+            if(axon_operation_poll(operation)) {
+                error = ALPM_ERR_TRANS_ABORT;
+                goto done;
+            }
+            single.data = candidate->data;
+            if(alpm_find_satisfier(&single, target->name) != NULL
+                    && alpm_pkg_find(providers, alpm_pkg_get_name(candidate->data)) == NULL) {
+                if(alpm_list_append(&providers, candidate->data) == NULL) {
+                    error = ALPM_ERR_MEMORY;
+                    goto done;
+                }
+            }
         }
     }
-    return(ALPM_ERR_PKG_NOT_FOUND);
+    error = repository_found ? ALPM_ERR_PKG_NOT_FOUND : ALPM_ERR_DB_NOT_FOUND;
+    if(providers != NULL) {
+        for(alpm_list_t *item = providers; item; item = item->next) {
+            alpm_pkg_t *installed = NULL;
+            alpm_errno_t local = axon_alpm_local_package(core, alpm_pkg_get_name(item->data), &installed);
+            if(local != ALPM_ERR_OK && local != ALPM_ERR_PKG_NOT_FOUND) {
+                error = local;
+                goto done;
+            }
+            if(installed != NULL) {
+                *package = item->data;
+                break;
+            }
+        }
+        if(*package == NULL && providers->next == NULL) {
+            *package = providers->data;
+        }
+        if(*package == NULL) {
+            alpm_question_t question = {.select_provider = {
+                .type = ALPM_QUESTION_SELECT_PROVIDER, .providers = providers, .depend = dependency}};
+            axon_operation_question(operation, &question);
+            if(question.select_provider.use_index >= 0) {
+                *package = alpm_list_nth(providers, (size_t)question.select_provider.use_index)->data;
+            }
+            else {
+                error = ALPM_ERR_TRANS_ABORT;
+            }
+        }
+        if(*package != NULL) {
+            error = ALPM_ERR_OK;
+        }
+    }
+done:
+    alpm_list_free(providers);
+    alpm_dep_free(dependency);
+    return(error);
 }
 
 static alpm_errno_t queue(axon_operation_t *operation, axon_operation_kind_t kind,
@@ -223,7 +293,7 @@ static alpm_errno_t queue(axon_operation_t *operation, axon_operation_kind_t kin
     alpm_pkg_t *package = NULL;
     alpm_errno_t error = kind == AXON_OPERATION_FILE
         ? axon_alpm_load(operation->core, target->name, &package)
-        : resolve(operation->core, target, &package);
+        : resolve(operation, target, &package);
     if(error == ALPM_ERR_PKG_NOT_FOUND && kind == AXON_OPERATION_INSTALL) {
         const alpm_list_t *repositories = NULL;
         error = axon_alpm_repositories(operation->core, &repositories);
@@ -263,10 +333,15 @@ static alpm_errno_t queue(axon_operation_t *operation, axon_operation_kind_t kin
         return(error);
     }
     if(alpm_list_find_str(operation->explicit_names, alpm_pkg_get_name(package)) != NULL) {
+        alpm_pkg_t *queued = alpm_pkg_find(alpm_trans_get_add(alpm_pkg_get_handle(package)),
+                                         alpm_pkg_get_name(package));
+        if(queued != NULL && alpm_pkg_vercmp(alpm_pkg_get_version(queued), alpm_pkg_get_version(package)) != 0) {
+            error = ALPM_ERR_TRANS_DUP_TARGET;
+        }
         if(kind == AXON_OPERATION_FILE) {
             alpm_pkg_free(package);
         }
-        return(ALPM_ERR_OK);
+        return(error);
     }
     if(alpm_pkg_should_ignore(alpm_pkg_get_handle(package), package)) {
         alpm_question_t value = {.install_ignorepkg = {
@@ -338,7 +413,18 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         backend_problem(result, error, NULL);
         goto fail;
     }
-    if(request->kind == AXON_OPERATION_UPGRADE) {
+    for(size_t index = 0; index < request->target_count; index++) {
+        if(axon_operation_poll(created)) {
+            break;
+        }
+        error = queue(created, request->kind == AXON_OPERATION_UPGRADE
+            ? AXON_OPERATION_INSTALL : request->kind, &request->targets[index]);
+        if(error != ALPM_ERR_OK) {
+            diagnostic(result, "target: %s", request->targets[index].name);
+            break;
+        }
+    }
+    if(error == ALPM_ERR_OK && !axon_operation_poll(created) && request->kind == AXON_OPERATION_UPGRADE) {
         const alpm_list_t *repositories = NULL;
         axon_alpm_repositories(created->core, &repositories);
         if(repositories == NULL) {
@@ -358,18 +444,6 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         error = axon_alpm_transaction_upgrade(created->core, request->allow_downgrade);
     }
 
-    else {
-        for(size_t index = 0; index < request->target_count; index++) {
-            if(axon_operation_poll(created)) {
-                break;
-            }
-            error = queue(created, request->kind, &request->targets[index]);
-            if(error != ALPM_ERR_OK) {
-                diagnostic(result, "target: %s", request->targets[index].name);
-                break;
-            }
-        }
-    }
     axon_alpm_problem_t problem = {0};
     if(error == ALPM_ERR_OK && !axon_operation_poll(created)) {
         error = axon_alpm_transaction_prepare(created->core, &problem);
@@ -378,6 +452,10 @@ axon_operation_status_t axon_operation_prepare(const axon_config_t *config,
         result->status = created->ignored ? AXON_OPERATION_POLICY : AXON_OPERATION_QUESTION;
         result->backend_error = error;
         diagnostic(result, "unresolved libalpm question: %d", created->question);
+    }
+
+    else if(error == ALPM_ERR_TRANS_ABORT && created->cancelled) {
+        result->status = AXON_OPERATION_CANCELLED;
     }
 
     else if(error != ALPM_ERR_OK) {

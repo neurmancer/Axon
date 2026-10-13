@@ -36,6 +36,9 @@ static void usage(FILE *output)
           "  -m/-n         Filter foreign/native packages (-Q)\n"
           "  -e/-d         Filter explicit/dependency packages (-Q)\n"
           "  -k/-kk        Check installed file presence/metadata (-Q)\n"
+          "  -Qu           List installed packages with available upgrades\n"
+          "  -p, --file    Inspect package archives with -Q (-Qip or -Qlp)\n"
+          "  -q, --quiet   Print names only for queries; paths only with -Ql\n"
           "  --checksums   Verify recorded hashes with -Qkk\n"
           "  --needed      Skip current versions with -S or -U\n"
           "  -Rs/-Rss      Recursively remove dependencies (twice includes explicit)\n"
@@ -44,7 +47,7 @@ static void usage(FILE *output)
           "  -U, --upgrade Install local package archives\n"
           "  -R, --remove  Remove installed packages\n"
           "  -y, --refresh Refresh repositories with -S (twice forces refresh)\n"
-          "  -u, --sysupgrade Full system upgrade with -S\n"
+          "  -u, --sysupgrade Full system upgrade with -S, optionally adding targets\n"
           "  --allow-downgrade Permit a downgrade plan (confirmation still required)\n"
           "  --orphans       List unneeded dependency packages\n"
           "  --depends PKG... Inspect installed dependencies\n"
@@ -105,6 +108,9 @@ int main(int argc, char **argv)
         {"explicit", no_argument, NULL, 'e'},
         {"deps", no_argument, NULL, 'd'},
         {"check", no_argument, NULL, 'k'},
+        {"file", no_argument, NULL, 'p'},
+        {"quiet", no_argument, NULL, 'q'},
+        {"upgrades", no_argument, NULL, 276},
         {"checksums", no_argument, NULL, 259},
         {"needed", no_argument, NULL, 258},
         {"cascade", no_argument, NULL, 'c'},
@@ -117,7 +123,7 @@ int main(int argc, char **argv)
 
     opterr = 0;
     
-    while((option = getopt_long(argc, argv, "QSishRUyulogmnedkc", options, NULL)) != -1) {
+    while((option = getopt_long(argc, argv, "QSishRUyulogmnedkcpq", options, NULL)) != -1) {
         switch(option) {
             case 256:
                 path = optarg;
@@ -148,6 +154,9 @@ int main(int argc, char **argv)
             case 'e': view.explicit_only = 1; break;
             case 'd': view.dependencies = 1; break;
             case 'k': view.check++; break;
+            case 'p': view.archive = 1; break;
+            case 'q': view.quiet = 1; break;
+            case 276: upgrade++; domain |= 1; break;
             case 'c': cascade = 1; break;
             case 258: needed = 1; break;
             case 259: view.checksums = 1; break;
@@ -193,6 +202,10 @@ int main(int argc, char **argv)
     view.sync = sync;
     view.info = info;
     view.search = !remove && searching;
+    if(query) {
+        view.upgrades = upgrade;
+        upgrade = 0;
+    }
     int modifiers = info + !!view.search + view.files + view.owns + !!view.groups + !!view.check;
     int filters = view.foreign || view.native || view.explicit_only || view.dependencies;
     int mutation = remove || local || (sync && modifiers == 0);
@@ -202,7 +215,8 @@ int main(int argc, char **argv)
         int targets = maintenance == AXON_DEPENDENCIES || maintenance == AXON_REASON_EXPLICIT
             || maintenance == AXON_REASON_DEPENDENCY;
         invalid |= query || sync || remove || local || modifiers || filters || refresh || upgrade
-            || downgrade || needed || cascade || view.checksums || (targets ? count == 0 : count != 0);
+            || downgrade || needed || cascade || view.checksums || view.archive || view.quiet
+            || view.upgrades || (targets ? count == 0 : count != 0);
         mutation = maintenance == AXON_REASON_EXPLICIT || maintenance == AXON_REASON_DEPENDENCY
             || maintenance == AXON_CLEAN_CACHE;
     }
@@ -214,10 +228,14 @@ int main(int argc, char **argv)
         invalid |= view.owns && (count == 0 || filters);
         invalid |= (info || view.search || view.groups) && !(query || sync);
         invalid |= view.check > 2 || view.groups > 2 || (view.checksums && view.check != 2);
+        invalid |= view.upgrades > 1;
+        invalid |= view.archive && (!query || !count || view.search || view.owns || view.groups
+            || view.check || filters || view.upgrades);
+        invalid |= view.quiet && !(query || (sync && modifiers));
         invalid |= refresh > 2 || upgrade > 1 || (refresh && (!sync || modifiers))
             || (upgrade && !(remove || (sync && !modifiers)));
         invalid |= (remove || local || (sync && !modifiers && !refresh && !upgrade)) && !count;
-        invalid |= sync && !modifiers && (refresh || upgrade) && count != 0;
+        invalid |= sync && !modifiers && refresh && !upgrade && count != 0;
         invalid |= downgrade && (!mutation || remove || (refresh && !upgrade));
         invalid |= needed && (!mutation || remove || (refresh && !upgrade));
         invalid |= cascade && !remove;

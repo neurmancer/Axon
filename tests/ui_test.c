@@ -164,6 +164,8 @@ int main(void)
     send_keys("\n");
     expect("Press Enter to return");
     assert(strstr(output, "UI regression package"));
+    assert(strstr(output, "Depends on") && strstr(output, "Conflicts with"));
+    assert(strstr(output, "Installed as a dependency"));
     send_keys("\n");
     expect("fixture");
     send_keys("r");

@@ -142,12 +142,10 @@ Remove installed packages after dependency resolution and approval.
 .BR \-y ", " \-\-refresh
 With \-S, refresh repositories. Repeat to force refresh.
 \-Sy refreshes only; \-Syu refreshes before preparing a full upgrade.
-Refresh operations take no package targets. Refresh-plus-individual-install
-combinations are rejected to avoid partial upgrades.
 .TP
 .BR \-u ", " \-\-sysupgrade
 With \-S, prepare a full system upgrade. \-Su uses cached repositories;
-\-Syu requires a successful refresh before preparation. Package targets are not accepted.
+\-Syu requires a successful refresh before preparation.
 .TP
 .B \-\-needed
 With repository installs, local archives or full upgrades, skip already-current packages.

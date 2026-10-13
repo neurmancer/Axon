@@ -68,7 +68,7 @@ tests/disk_full.so: tests/disk_full.c
 tests/maintenance_test.out: tests/maintenance_test.c src/cli/maintenance.o libaxon-alpm.a
 	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $^ $(ALPM_LIBS) $(TEST_LIBS) $(LDLIBS) -Wl,--wrap=axon_privilege_check,--wrap=axon_fprintf,--wrap=malloc -o $@
 
-tests/ui_test.out: tests/ui_test.c src/ui/terminal.o src/cli/mutation.o src/cli/maintenance.o libaxon-alpm.a
+tests/ui_test.out: tests/ui_test.c src/ui/terminal.o src/cli/query.o src/cli/mutation.o src/cli/maintenance.o libaxon-alpm.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG $(LDFLAGS) $^ $(ALPM_LIBS) $(UI_LIBS) $(LDLIBS) -lutil -Wl,--wrap=axon_privilege_check -o $@
 
 tests/package_test.out: tests/package_test.c axon

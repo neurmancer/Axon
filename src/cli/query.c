@@ -52,6 +52,24 @@ static void message(void *context, const char *text)
     axon_fprintf(stderr, "axon: %s\n", text);
 }
 
+static int dependencies(const char *label, alpm_list_t *items)
+{
+    axon_fprintf(stdout, "%-15s: ", label);
+    if(items == NULL) {
+        fputs("None", stdout);
+    }
+    for(alpm_list_t *item = items; item; item = item->next) {
+        char *text = alpm_dep_compute_string(item->data);
+        if(text == NULL) {
+            return(1);
+        }
+        axon_fprintf(stdout, "%s%s", item == items ? "" : "  ", text);
+        free(text);
+    }
+    putchar('\n');
+    return(0);
+}
+
 static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *package)
 {
     const char *name = alpm_pkg_get_name(package);
@@ -66,7 +84,10 @@ static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *packag
             return(1);
         }
         for(size_t index = 0; index < files->count; index++) {
-            axon_fprintf(stdout, "%s %s%s\n", name, alpm_option_get_root(core->handle), files->files[index].name);
+            if(!query->quiet) {
+                axon_fprintf(stdout, "%s ", name);
+            }
+            axon_fprintf(stdout, "%s%s\n", query->archive ? "" : alpm_option_get_root(core->handle), files->files[index].name);
         }
     }
     else if(query->info) {
@@ -76,12 +97,33 @@ static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *packag
                value(alpm_pkg_get_url(package)), (intmax_t)alpm_pkg_get_isize(package));
         if(query->sync) {
             axon_fprintf(stdout, "Repository     : %s\n", alpm_db_get_name(alpm_pkg_get_db(package)));
+            alpm_pkg_t *installed = NULL;
+            alpm_errno_t error = axon_alpm_local_package(core, name, &installed);
+            if(error != ALPM_ERR_OK && error != ALPM_ERR_PKG_NOT_FOUND) {
+                return(1);
+            }
+            axon_fprintf(stdout, "Install reason : %s\n", installed == NULL ? "Not installed"
+                : alpm_pkg_get_reason(installed) == ALPM_PKG_REASON_EXPLICIT
+                ? "Explicitly installed" : "Installed as a dependency");
         }
-        else {
+        else if(!query->archive) {
             axon_fprintf(stdout, "Install reason : %s\n", alpm_pkg_get_reason(package) == ALPM_PKG_REASON_EXPLICIT
                 ? "Explicitly installed" : "Installed as a dependency");
         }
+        else {
+            fputs("Install reason : Not applicable (package archive)\n", stdout);
+        }
+        if(dependencies("Depends on", alpm_pkg_get_depends(package))
+                || dependencies("Optional deps", alpm_pkg_get_optdepends(package))
+                || dependencies("Provides", alpm_pkg_get_provides(package))
+                || dependencies("Conflicts with", alpm_pkg_get_conflicts(package))
+                || dependencies("Replaces", alpm_pkg_get_replaces(package))) {
+            return(1);
+        }
         putchar('\n');
+    }
+    else if(query->quiet) {
+        axon_fprintf(stdout, "%s\n", name);
     }
     else if(query->search) {
         axon_fprintf(stdout, "%s/%s %s", query->sync ? alpm_db_get_name(alpm_pkg_get_db(package)) : "local", name, version);
@@ -107,12 +149,19 @@ static int show(axon_alpm_t *core, const axon_query_t *query, alpm_pkg_t *packag
         axon_fprintf(stdout, "\n    %s\n", value(alpm_pkg_get_desc(package)));
     }
     else {
-        axon_fprintf(stdout, "%s %s\n", name, version);
+        axon_fprintf(stdout, "%s %s", name, version);
+        if(query->upgrades) {
+            alpm_pkg_t *remote = alpm_sync_get_new_version(package, alpm_get_syncdbs(core->handle));
+            if(remote != NULL) {
+                axon_fprintf(stdout, " -> %s", alpm_pkg_get_version(remote));
+            }
+        }
+        putchar('\n');
     }
     return(0);
 }
 
-static int ownership(axon_alpm_t *core, int count, char **targets)
+static int ownership(axon_alpm_t *core, const axon_query_t *query, int count, char **targets)
 {
     const alpm_list_t *packages = NULL;
     if(axon_alpm_local_packages(core, &packages) != ALPM_ERR_OK) {
@@ -161,8 +210,13 @@ static int ownership(axon_alpm_t *core, int count, char **targets)
                         size--;
                     }
                     if(strlen(relative) == size && strncmp(relative, record, size) == 0) {
-                        axon_fprintf(stdout, "%s is owned by %s %s\n", absolute,
-                               alpm_pkg_get_name(package), alpm_pkg_get_version(package));
+                        if(query->quiet) {
+                            axon_fprintf(stdout, "%s\n", alpm_pkg_get_name(package));
+                        }
+                        else {
+                            axon_fprintf(stdout, "%s is owned by %s %s\n", absolute,
+                                   alpm_pkg_get_name(package), alpm_pkg_get_version(package));
+                        }
                         found = 1;
                         break;
                     }
@@ -182,17 +236,40 @@ static int ownership(axon_alpm_t *core, int count, char **targets)
 
 int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char **targets)
 {
+    if(query->archive) {
+        int status = 0;
+        for(int index = 0; index < count; index++) {
+            alpm_pkg_t *package = NULL;
+            if(alpm_pkg_load(core->handle, targets[index], 1, 0, &package) < 0) {
+                axon_fprintf(stderr, "axon: %s: %s\n", targets[index], alpm_strerror(alpm_errno(core->handle)));
+                status = 1;
+                continue;
+            }
+            status |= show(core, query, package);
+            alpm_pkg_free(package);
+        }
+        return(status);
+    }
     if(query->check && axon_maintenance_records(core, 0, message, NULL) != ALPM_ERR_OK) {
         return(1);
     }
     if(query->owns) {
-        return(ownership(core, count, targets));
+        return(ownership(core, query, count, targets));
+    }
+    alpm_list_t *upgrades = NULL;
+    if(query->upgrades) {
+        alpm_errno_t error = axon_alpm_upgrades(core, &upgrades);
+        if(error != ALPM_ERR_OK) {
+            axon_fprintf(stderr, "axon: upgrade query failed: %s\n", alpm_strerror(error));
+            return(1);
+        }
     }
     alpm_list_t *patterns = NULL, *packages = NULL;
     if(query->search) {
         for(int index = 0; index < count; index++) {
             if(alpm_list_append(&patterns, targets[index]) == NULL) {
                 alpm_list_free(patterns);
+                alpm_list_free(upgrades);
                 return(1);
             }
         }
@@ -201,10 +278,12 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
     alpm_list_free(patterns);
     if(error != ALPM_ERR_OK) {
         axon_fprintf(stderr, "axon: %s search failed: %s\n", query->sync ? "repository" : "local", alpm_strerror(error));
+        alpm_list_free(upgrades);
         return(1);
     }
     int status = 0;
     int passes = !query->search && count ? count : 1;
+    int any_found = 0;
     alpm_list_t *seen_groups = NULL;
     for(int index = 0; index < passes; index++) {
         int found = 0;
@@ -215,7 +294,7 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
                 status = 1;
                 continue;
             }
-            if(!match) {
+            if(!match || (query->upgrades && alpm_pkg_find(upgrades, alpm_pkg_get_name(package)) == NULL)) {
                 continue;
             }
             if(query->groups) {
@@ -224,6 +303,7 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
                         continue;
                     }
                     found = 1;
+                    any_found = 1;
                     if(query->sync && !count && query->groups == 1) {
                         if(alpm_list_find_str(seen_groups, group->data) == NULL) {
                             axon_fprintf(stdout, "%s\n", (char *)group->data);
@@ -233,7 +313,10 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
                         }
                     }
                     else {
-                        axon_fprintf(stdout, "%s %s\n", (char *)group->data, alpm_pkg_get_name(package));
+                        if(!query->quiet) {
+                            axon_fprintf(stdout, "%s ", (char *)group->data);
+                        }
+                        axon_fprintf(stdout, "%s\n", alpm_pkg_get_name(package));
                     }
                 }
                 continue;
@@ -253,17 +336,21 @@ int axon_cli_query(axon_alpm_t *core, const axon_query_t *query, int count, char
                 }
             }
             found = 1;
+            any_found = 1;
             status |= show(core, query, package);
             if(query->sync && query->info && count) {
                 break;
             }
         }
         if(!found && count && !query->search) {
-            axon_fprintf(stderr, "axon: %s: package or group not found\n", targets[index]);
+            if(!query->upgrades) {
+                axon_fprintf(stderr, "axon: %s: package or group not found\n", targets[index]);
+            }
             status = 1;
         }
     }
     alpm_list_free(seen_groups);
     alpm_list_free(packages);
-    return(status);
+    alpm_list_free(upgrades);
+    return(status || (query->upgrades && !any_found));
 }

@@ -225,6 +225,7 @@ struct package {
     const char *replaces;
     const char *group;
     const char *architecture;
+    const char *provides;
     char path[512];
 };
 
@@ -265,12 +266,13 @@ static void make_package(struct package *package, const char *directory)
     char metadata[2048];
     int length = snprintf(metadata, sizeof(metadata),
         "pkgname = %s\npkgver = %s\npkgdesc = Operation fixture\nsize = %d\narch = %s\n"
-        "%s%s\n%s%s\n%s%s\n",
+        "%s%s\n%s%s\n%s%s\n%s%s\n",
         package->name, package->version, package->size,
         package->architecture != NULL ? package->architecture : "any",
         package->dependency != NULL ? "depend = " : "", package->dependency != NULL ? package->dependency : "",
         package->replaces != NULL ? "replaces = " : "", package->replaces != NULL ? package->replaces : "",
-        package->group != NULL ? "group = " : "", package->group != NULL ? package->group : "");
+        package->group != NULL ? "group = " : "", package->group != NULL ? package->group : "",
+        package->provides != NULL ? "provides = " : "", package->provides != NULL ? package->provides : "");
     assert(length > 0 && (size_t)length < sizeof(metadata));
     struct archive *archive = archive_open(package->path);
     archive_item(archive, ".PKGINFO", metadata);
@@ -293,12 +295,13 @@ static void make_repository(const char *path, struct package *packages, size_t c
             "%%NAME%%\n%s\n\n%%VERSION%%\n%s\n\n%%DESC%%\nOperation fixture\n\n"
             "%%FILENAME%%\n%s-%s-any.pkg.tar\n\n%%ARCH%%\nany\n\n"
             "%%CSIZE%%\n%lld\n\n%%ISIZE%%\n%d\n\n%%SHA256SUM%%\n%s\n\n"
-            "%s%s\n\n%s%s\n\n%s%s\n\n",
+            "%s%s\n\n%s%s\n\n%s%s\n\n%s%s\n\n",
             package->name, package->version, package->name, package->version,
             (long long)info.st_size, package->size, hash,
             package->dependency != NULL ? "%DEPENDS%\n" : "", package->dependency != NULL ? package->dependency : "",
             package->replaces != NULL ? "%REPLACES%\n" : "", package->replaces != NULL ? package->replaces : "",
-            package->group != NULL ? "%GROUPS%\n" : "", package->group != NULL ? package->group : "");
+            package->group != NULL ? "%GROUPS%\n" : "", package->group != NULL ? package->group : "",
+            package->provides != NULL ? "%PROVIDES%\n" : "", package->provides != NULL ? package->provides : "");
         assert(length > 0 && (size_t)length < sizeof(metadata));
         free(hash);
         char entry[256];
@@ -381,7 +384,9 @@ int main(void)
         {.name = "helper", .version = "1-1", .size = 5, .group = "tools"},
         {.name = "application", .version = "1-1", .size = 15, .dependency = "helper>=1", .group = "tools"},
         {.name = "substitute", .version = "1-1", .size = 11, .replaces = "legacy"},
-        {.name = "ignored", .version = "1-1", .size = 3, .group = "ignored-group"}
+        {.name = "ignored", .version = "1-1", .size = 3, .group = "ignored-group", .provides = "ignored-virtual"},
+        {.name = "provider-a", .version = "1-1", .size = 1, .provides = "virtual=2"},
+        {.name = "provider-b", .version = "1-1", .size = 1, .provides = "virtual=3"}
     };
     struct package lower_priority = {.name = "essential", .version = "3-1", .size = 14};
     for(size_t index = 0; index < sizeof(locals) / sizeof(locals[0]); index++) {
@@ -529,6 +534,60 @@ int main(void)
 
     EXPECT(axon_operation_refresh(config, 1, &result), AXON_OPERATION_OK);
     assert(result.refreshed);
+    {
+        axon_operation_target_t target = {.name = "essential>=3"};
+        axon_operation_request_t resolve = {.kind = AXON_OPERATION_INSTALL,
+            .targets = &target, .target_count = 1, .flags = safe_flags};
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_OK);
+        assert(strcmp(entry(axon_operation_plan(operation), "essential")->repository, "second") == 0);
+        release(&operation);
+        target.repository = "first";
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_BACKEND);
+        assert(result.backend_error == ALPM_ERR_PKG_NOT_FOUND);
+        target = (axon_operation_target_t){.name = "virtual>=3", .repository = "first"};
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_OK);
+        assert(entry(axon_operation_plan(operation), "provider-b")->explicit_target);
+        release(&operation);
+        target.name = "virtual>=4";
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_BACKEND);
+        assert(result.backend_error == ALPM_ERR_PKG_NOT_FOUND);
+        target.name = "virtual";
+        struct observer provider = {.answer = AXON_DECISION_ACCEPT, .provider = 1};
+        resolve.callbacks = (axon_operation_callbacks_t){.question = decide, .context = &provider};
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_OK);
+        assert(provider.questions == 1 && entry(axon_operation_plan(operation), "provider-b") != NULL);
+        release(&operation);
+        provider.answer = AXON_DECISION_DECLINE;
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_BACKEND);
+        assert(operation == NULL && access("db/db.lck", F_OK) != 0);
+        provider.answer = AXON_DECISION_CANCEL;
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_CANCELLED);
+        provider.answer = AXON_DECISION_UNANSWERED;
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_QUESTION);
+        provider.answer = AXON_DECISION_ACCEPT;
+        provider.provider = SIZE_MAX;
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_QUESTION);
+        target.name = "ignored-virtual";
+        provider.answer = AXON_DECISION_DECLINE;
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_POLICY);
+        assert(result.backend_error == ALPM_ERR_PKG_IGNORED);
+        provider.answer = AXON_DECISION_ACCEPT;
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_OK);
+        assert(entry(axon_operation_plan(operation), "ignored")->explicit_target);
+        release(&operation);
+        axon_operation_target_t combined[] = {{.name = "essential>=3", .repository = "second"},
+                                            {.name = "application"}};
+        resolve = (axon_operation_request_t){.kind = AXON_OPERATION_UPGRADE,
+            .targets = combined, .target_count = 2, .flags = safe_flags, .allow_replacements = 1};
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_OK);
+        assert(strcmp(entry(axon_operation_plan(operation), "essential")->new_version, "3-1") == 0);
+        assert(entry(axon_operation_plan(operation), "application")->explicit_target);
+        assert(entry(axon_operation_plan(operation), "legacy") != NULL);
+        release(&operation);
+        combined[1].name = "essential>=2";
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_BACKEND);
+        assert(result.backend_error == ALPM_ERR_TRANS_DUP_TARGET);
+    }
     axon_operation_target_t group_targets[] = {{.name = "tools"}, {.name = "helper"}};
     axon_operation_request_t group_request = {.kind = AXON_OPERATION_INSTALL,
         .targets = group_targets, .target_count = 2, .flags = safe_flags};
@@ -601,14 +660,18 @@ int main(void)
         request.callbacks = (axon_operation_callbacks_t){0};
     }
     request.allow_replacements = 1;
-    EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
+    axon_operation_target_t additional = {.name = "virtual>=3", .repository = "first"};
+    request.targets = &additional;
+    request.target_count = 1;
+    EXPECT(axon_operation_prepare_upgrade(config, 1, &request, &operation, &result), AXON_OPERATION_OK);
     plan = axon_operation_plan(operation);
     assert(entry(plan, "essential")->kind == AXON_CHANGE_UPGRADE);
     assert(strcmp(entry(plan, "essential")->new_version, "2-1") == 0);
     assert(strcmp(entry(plan, "essential")->old_version, "1-1") == 0);
     assert(entry(plan, "legacy")->kind == AXON_CHANGE_REPLACE && entry(plan, "legacy")->held);
     assert(strcmp(entry(plan, "legacy")->replaced_by, "substitute") == 0);
-    assert(plan->installed_delta == 6);
+    assert(plan->installed_delta == 7);
+    assert(entry(plan, "provider-b")->explicit_target);
     approved = approval(operation);
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_POLICY);
     const char *legacy[] = {"legacy"};
@@ -617,12 +680,27 @@ int main(void)
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
     release(&operation);
     installed(config, "essential", "2-1", ALPM_PKG_REASON_EXPLICIT);
+    installed(config, "application", "1-1", ALPM_PKG_REASON_EXPLICIT);
+    installed(config, "helper", "1-1", ALPM_PKG_REASON_DEPEND);
+    installed(config, "provider-b", "1-1", ALPM_PKG_REASON_EXPLICIT);
+    request.targets = NULL;
+    request.target_count = 0;
     EXPECT(axon_operation_prepare(config, &request, &operation, &result), AXON_OPERATION_OK);
     assert(axon_operation_plan(operation)->count == 0);
     approved = approval(operation);
     EXPECT(axon_operation_commit(operation, &approved, &result), AXON_OPERATION_OK);
     assert(!result.may_have_changes);
     release(&operation);
+
+    {
+        axon_operation_target_t target = {.name = "virtual"};
+        axon_operation_request_t resolve = {.kind = AXON_OPERATION_INSTALL, .targets = &target,
+            .target_count = 1, .flags = safe_flags};
+        EXPECT(axon_operation_prepare(config, &resolve, &operation, &result), AXON_OPERATION_OK);
+        assert(entry(axon_operation_plan(operation), "provider-b") != NULL);
+        assert(entry(axon_operation_plan(operation), "provider-a") == NULL);
+        release(&operation);
+    }
 
     targets[0] = (axon_operation_target_t){.name = "essential"};
     request = (axon_operation_request_t){.kind = AXON_OPERATION_INSTALL, .targets = targets,

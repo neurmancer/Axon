@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 static char *binary;
+static char output[16384];
 
 static void write_file(const char *path, const char *contents)
 {
@@ -36,7 +37,6 @@ static void run(char *const arguments[], int expected, const char *text)
     }
 
     close(descriptors[1]);
-    char output[16384];
     size_t used = 0;
     ssize_t count;
     while((count = read(descriptors[0], output + used, sizeof(output) - used - 1)) > 0) {
@@ -62,7 +62,9 @@ static void run(char *const arguments[], int expected, const char *text)
 static void repository(void)
 {
     const char *description = "%NAME%\nremote-fixture\n\n%VERSION%\n2-1\n\n"
-                              "%DESC%\nRemote test package\n\n%ARCH%\nany\n\n";
+                              "%DESC%\nRemote test package\n\n%ARCH%\nany\n\n"
+                              "%DEPENDS%\nlocal-fixture>=1\n\n%CONFLICTS%\nold-fixture\n\n"
+                              "%PROVIDES%\nvirtual-fixture=2\n\n%OPTDEPENDS%\nextra-fixture: optional feature\n\n";
     struct archive *archive = archive_write_new();
     struct archive_entry *entry = archive_entry_new();
     assert(archive != NULL && entry != NULL);
@@ -77,6 +79,29 @@ static void repository(void)
     archive_entry_free(entry);
     assert(archive_write_close(archive) == ARCHIVE_OK);
     assert(archive_write_free(archive) == ARCHIVE_OK);
+}
+
+static void package_archive(void)
+{
+    const char *paths[] = {".PKGINFO", "usr/share/archive-fixture"};
+    const char *texts[] = {"pkgname = archive-fixture\npkgver = 3-1\narch = any\n"
+        "pkgdesc = Archive metadata fixture\ndepend = local-fixture>=1\nconflict = old-fixture\n",
+        "archive payload\n"};
+    struct archive *archive = archive_write_new();
+    assert(archive != NULL && archive_write_set_format_pax_restricted(archive) == ARCHIVE_OK);
+    assert(archive_write_open_filename(archive, "fixture.pkg.tar") == ARCHIVE_OK);
+    for(size_t index = 0; index < 2; index++) {
+        struct archive_entry *entry = archive_entry_new();
+        assert(entry != NULL);
+        archive_entry_set_pathname(entry, paths[index]);
+        archive_entry_set_filetype(entry, AE_IFREG);
+        archive_entry_set_perm(entry, 0644);
+        archive_entry_set_size(entry, (la_int64_t)strlen(texts[index]));
+        assert(archive_write_header(archive, entry) == ARCHIVE_OK);
+        assert(archive_write_data(archive, texts[index], strlen(texts[index])) == (la_ssize_t)strlen(texts[index]));
+        archive_entry_free(entry);
+    }
+    assert(archive_write_close(archive) == ARCHIVE_OK && archive_write_free(archive) == ARCHIVE_OK);
 }
 
 static int remove_entry(const char *path, const struct stat *info, int type, struct FTW *walk)
@@ -169,9 +194,56 @@ int main(void)
         run(reason, 1, "root");
         char *clean[] = {binary, "--config", "pacman.conf", "--clean-cache", NULL};
         run(clean, 1, "root");
+        char *upgrade_install[] = {binary, "--config", "pacman.conf", "-Syu", "fixture/remote-fixture", NULL};
+        run(upgrade_install, 1, "root");
     }
+    char *quiet[] = {binary, "--config", "pacman.conf", "-Qq", NULL};
+    run(quiet, 0, "local-fixture\n");
+    assert(strcmp(output, "local-fixture\n") == 0);
+    char *quiet_search[] = {binary, "--config", "pacman.conf", "-Ssq", "Remote", NULL};
+    run(quiet_search, 0, "remote-fixture\n");
+    assert(strcmp(output, "remote-fixture\n") == 0);
+    char *remote_info[] = {binary, "--config", "pacman.conf", "-Si", "remote-fixture", NULL};
+    run(remote_info, 0, "Depends on     : local-fixture>=1\n");
+    assert(strstr(output, "Conflicts with : old-fixture\n") && strstr(output, "Install reason : Not installed\n"));
+    assert(strstr(output, "Provides       : virtual-fixture=2\n") && strstr(output, "extra-fixture: optional feature"));
+    char *upgrades[] = {binary, "--config", "pacman.conf", "-Qu", NULL};
+    run(upgrades, 1, "");
+    assert(output[0] == '\0');
+    assert(mkdir("db/local/remote-fixture-1-1", 0700) == 0);
+    write_file("db/local/remote-fixture-1-1/desc", "%NAME%\nremote-fixture\n\n%VERSION%\n1-1\n\n%REASON%\n1\n\n");
+    write_file("db/local/remote-fixture-1-1/files", "%FILES%\n\n");
+    run(upgrades, 0, "remote-fixture 1-1 -> 2-1\n");
+    assert(strcmp(output, "remote-fixture 1-1 -> 2-1\n") == 0);
+    char *quiet_upgrades[] = {binary, "--config", "pacman.conf", "-Quq", NULL};
+    run(quiet_upgrades, 0, "remote-fixture\n");
+    assert(strcmp(output, "remote-fixture\n") == 0);
+    char *explicit_upgrades[] = {binary, "--config", "pacman.conf", "-Queq", NULL};
+    run(explicit_upgrades, 1, "");
+    assert(output[0] == '\0');
+    run(remote_info, 0, "Install reason : Installed as a dependency\n");
+    package_archive();
+    char *archive_info[] = {binary, "--config", "pacman.conf", "-Qip", "fixture.pkg.tar", NULL};
+    run(archive_info, 0, "Archive metadata fixture");
+    assert(strstr(output, "local-fixture>=1") && strstr(output, "old-fixture") && strstr(output, "Not applicable"));
+    char *archive_files[] = {binary, "--config", "pacman.conf", "-Qlpq", "fixture.pkg.tar", NULL};
+    run(archive_files, 0, "usr/share/archive-fixture\n");
+    assert(strcmp(output, "usr/share/archive-fixture\n") == 0);
+    char *archive_names[] = {binary, "--config", "pacman.conf", "-Qpq", "fixture.pkg.tar", NULL};
+    run(archive_names, 0, "archive-fixture\n");
+    assert(strcmp(output, "archive-fixture\n") == 0);
+    char *archive_mixed[] = {binary, "--config", "pacman.conf", "-Qp", "pacman.conf", "fixture.pkg.tar", NULL};
+    run(archive_mixed, 1, "archive-fixture 3-1\n");
+    const char *invalid_queries[] = {"-Qpu", "-Qps", "-Qpk", "-Qpe", "-Qpo", "-Sp", "-Sq", "-Uq"};
+    for(size_t index = 0; index < sizeof(invalid_queries) / sizeof(*invalid_queries); index++) {
+        char *arguments[] = {binary, (char *)invalid_queries[index], "fixture.pkg.tar", NULL};
+        run(arguments, 2, "incompatible operation");
+    }
+    char *archive_missing[] = {binary, "-Qp", NULL};
+    run(archive_missing, 2, "incompatible operation");
     assert(unlink("db/sync/fixture.db") == 0);
     run(search, 1, "repository search failed");
+    run(upgrades, 1, "upgrade query failed");
     assert(chdir(previous) == 0);
     assert(nftw(workspace, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
     free(previous);
