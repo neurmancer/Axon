@@ -196,6 +196,9 @@ alpm_errno_t axon_maintenance_files(axon_alpm_t *core, alpm_pkg_t *package,
         }
         int descriptor = open_rooted(root, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
         if(descriptor < 0) {
+            if(errno == ENOENT && alpm_option_match_noextract(core->handle, name) == 0) {
+                continue;
+            }
             report(message, context, "%s: %s%s: %s; restore from backup or reinstall the owning package",
                    owner, root_path, name, strerror(errno));
             failed = 1;
@@ -239,6 +242,7 @@ alpm_errno_t axon_maintenance_files(axon_alpm_t *core, alpm_pkg_t *package,
             failed = 1;
             continue;
         }
+        const char *record_name = name;
         for(size_t index = 0; index < files->count; index++) {
             const char *record = files->files[index].name;
             size_t size = strlen(record);
@@ -247,9 +251,14 @@ alpm_errno_t axon_maintenance_files(axon_alpm_t *core, alpm_pkg_t *package,
             }
             if(strlen(name) == size && strncmp(name, record, size) == 0) {
                 seen[index] = 1;
+                record_name = record;
             }
         }
         int descriptor = open_rooted(root, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        if(descriptor < 0 && errno == ENOENT
+                && alpm_option_match_noextract(core->handle, record_name) == 0) {
+            continue;
+        }
         struct stat info;
         if(descriptor < 0 || fstat(descriptor, &info) < 0) {
             report(message, context, "%s: %s%s: cannot read metadata: %s", owner, root_path, name, strerror(errno));

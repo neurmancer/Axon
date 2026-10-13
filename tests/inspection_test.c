@@ -108,6 +108,67 @@ static void mtree(void)
     free(hash);
 }
 
+static void check_status(const char *option, const char *target, int expected)
+{
+    char output[32768];
+    int reference = run("/usr/bin/pacman", option, target, NULL, output, sizeof(output));
+    if(reference != expected) {
+        fprintf(stderr, "pacman %s %s: expected %d, got %d\n%s", option, target, expected, reference, output);
+        abort();
+    }
+    int status = run(binary, option, target, NULL, output, sizeof(output));
+    if(status != expected) {
+        fprintf(stderr, "%s %s: expected %d, got %d\n%s", option, target, expected, status, output);
+        abort();
+    }
+    if(expected == 0) {
+        assert(!*output);
+    }
+    if(strcmp(option, "-Qkk") == 0) {
+        assert(run(binary, option, target, "--checksums", output, sizeof(output)) == expected);
+    }
+}
+
+static void noextract(void)
+{
+    assert(unlink("root/bin/tool") == 0);
+    const char *patterns[] = {"bin/*", "bin/* !bin/tool", "bin/* !bin/tool bin/tool", "etc/*"};
+    const int expected[] = {0, 1, 0, 1};
+    char text[4096];
+    for(size_t index = 0; index < sizeof(patterns) / sizeof(*patterns); index++) {
+        snprintf(text, sizeof(text), "[options]\nRootDir = %s/root\nDBPath = %s/db\n"
+                 "SigLevel = Never\nNoExtract = %s\n", workspace, workspace, patterns[index]);
+        write_text("pacman.conf", text);
+        check_status("-Qk", "alpha", expected[index]);
+        check_status("-Qkk", "alpha", expected[index]);
+    }
+    snprintf(text, sizeof(text), "[options]\nRootDir = %s/root\nDBPath = %s/db\n"
+             "SigLevel = Never\nNoExtract = bin/* omitted/\n", workspace, workspace);
+    write_text("pacman.conf", text);
+    write_text("root/bin/tool", "modified excluded file");
+    assert(chmod("root/bin/tool", 0644) == 0);
+    check_status("-Qk", "alpha", 0);
+    check_status("-Qkk", "alpha", 1);
+    write_text("root/bin/tool", "good");
+    if(getuid() != 0) {
+        char output[32768];
+        assert(chmod("root/bin", 0000) == 0);
+        assert(run(binary, "-Qk", "alpha", NULL, output, sizeof(output)) == 1);
+        assert(strstr(output, "Permission denied"));
+        assert(run(binary, "-Qkk", "alpha", "--checksums", output, sizeof(output)) == 1);
+        assert(strstr(output, "Permission denied"));
+        assert(chmod("root/bin", 0700) == 0);
+    }
+    write_text("db/local/beta-1-1/files", "%FILES%\nomitted/\n\n");
+    snprintf(text, sizeof(text), "#mtree\n./omitted type=dir uid=%u gid=%u mode=755\n", getuid(), getgid());
+    write_text("db/local/beta-1-1/mtree", text);
+    check_status("-Qk", "beta", 0);
+    char output[32768];
+    assert(run(binary, "-Qkk", "beta", "--checksums", output, sizeof(output)) == 0 && !*output);
+    write_text("db/local/beta-1-1/files", "%FILES%\n\n");
+    assert(unlink("db/local/beta-1-1/mtree") == 0);
+}
+
 static int remove_entry(const char *path, const struct stat *info, int type, struct FTW *walk)
 {
     (void)info;
@@ -153,6 +214,8 @@ int main(void)
     compare("-Q", "alpha");
     compare("-Qs", "Alpha");
     compare("-Qo", "root/bin/tool");
+    noextract();
+    write_text("pacman.conf", text);
     char output[32768];
     compare("-Ss", "Alpha");
     char limited[4096], reference[32768];

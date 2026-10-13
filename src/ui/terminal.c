@@ -297,11 +297,17 @@ int axon_terminal(const axon_config_t *config)
             endwin();
             clearerr(stdin);
             if(key == 'o' || key == 'c' || key == 'd') {
-                axon_cli_maintenance(config, key == 'o' ? AXON_ORPHANS : key == 'c' ? AXON_CLEAN_CACHE : AXON_CHECK_DATABASE, 0, NULL);
+                if(axon_cli_maintenance(config, key == 'o' ? AXON_ORPHANS : key == 'c' ? AXON_CLEAN_CACHE : AXON_CHECK_DATABASE,
+                                        0, NULL) != 0) {
+                    status = 1;
+                }
             }
 
             else if((key == 'e' || key == 'b') && selected) {
-                axon_cli_maintenance(config, key == 'e' ? AXON_REASON_EXPLICIT : AXON_REASON_DEPENDENCY, selected, targets);
+                if(axon_cli_maintenance(config, key == 'e' ? AXON_REASON_EXPLICIT : AXON_REASON_DEPENDENCY,
+                                        selected, targets) != 0) {
+                    status = 1;
+                }
             }
 
             else if(key == '\n' && shown) {

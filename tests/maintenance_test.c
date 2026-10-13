@@ -1,14 +1,18 @@
 #define _XOPEN_SOURCE 700
 #include "maintenance.h"
+#include "../src/cli/maintenance.h"
+#include "../src/ui/output.h"
 
 #include <archive.h>
 #include <archive_entry.h>
 #include <assert.h>
+#include <errno.h>
 #include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char workspace[] = "/tmp/axon-maintenance-XXXXXX";
@@ -17,6 +21,33 @@ static int authorized = 1;
 static volatile sig_atomic_t cancel;
 static size_t previews;
 static int messages;
+static int fail_preview;
+static int fail_allocation;
+
+void *__real_malloc(size_t size);
+
+void *__wrap_malloc(size_t size)
+{
+    if(fail_allocation) {
+        fail_allocation = 0;
+        errno = ENOMEM;
+        return(NULL);
+    }
+    return(__real_malloc(size));
+}
+
+int __wrap_axon_fprintf(FILE *stream, const char *format, ...)
+{
+    if(fail_preview && stream == stdout && strcmp(format, "  %s\n") == 0) {
+        fail_preview = 0;
+        fail_allocation = 1;
+    }
+    va_list args;
+    va_start(args, format);
+    int status = axon_vfprintf(stream, format, args);
+    va_end(args);
+    return(status);
+}
 
 axon_privilege_result_t __wrap_axon_privilege_check(int root)
 {
@@ -99,6 +130,39 @@ static void reason(const axon_config_t *config, const char *name, alpm_pkgreason
     assert(axon_alpm_release(&core) == 0);
 }
 
+static void cli_approval(const axon_config_t *config, int action, int fail)
+{
+    fflush(NULL);
+    pid_t child = fork();
+    assert(child >= 0);
+    if(child == 0) {
+        FILE *input = tmpfile();
+        assert(input && fputs("y\n", input) >= 0 && fflush(input) == 0);
+        rewind(input);
+        assert(dup2(fileno(input), STDIN_FILENO) == STDIN_FILENO);
+        assert(fclose(input) == 0);
+        clearerr(stdin);
+        assert(freopen("/dev/null", "w", stdout) != NULL);
+        fail_preview = fail;
+        char *name = "installed";
+        int cache = action == AXON_CLEAN_CACHE;
+        int status = axon_cli_maintenance(config, action, cache ? 0 : 1, cache ? NULL : &name);
+        assert(status == (fail ? 1 : 0));
+        assert(!fail_preview && !fail_allocation && axon_output_failed() == fail);
+        if(fail) {
+            assert(!ferror(stdout) && !ferror(stderr));
+            assert(getchar() == 'y');
+        }
+        axon_config_t *owned = (axon_config_t *)config;
+        axon_config_free(&owned);
+        exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(access("db/db.lck", F_OK) != 0);
+}
+
 static void message(void *context, const char *text)
 {
     (void)context;
@@ -162,6 +226,14 @@ int main(void)
     local("consumer", 0, "%DEPENDS%\nneeded\n\n%OPTDEPENDS%\noptional: useful\n\n");
     archive_file("db/sync/test.db", "current-2-1/desc", "%NAME%\ncurrent\n\n%VERSION%\n2-1\n\n%ARCH%\nany\n\n");
     axon_config_t *config = configuration("KeepInstalled KeepCurrent");
+    cli_approval(config, AXON_REASON_DEPENDENCY, 1);
+    reason(config, "installed", ALPM_PKG_REASON_EXPLICIT);
+    cli_approval(config, AXON_REASON_DEPENDENCY, 0);
+    reason(config, "installed", ALPM_PKG_REASON_DEPEND);
+    cli_approval(config, AXON_REASON_EXPLICIT, 1);
+    reason(config, "installed", ALPM_PKG_REASON_DEPEND);
+    cli_approval(config, AXON_REASON_EXPLICIT, 0);
+    reason(config, "installed", ALPM_PKG_REASON_EXPLICIT);
     axon_alpm_t *core = open_core(config);
     const char *names[] = {"installed", "orphan", "needed", "optional"};
     for(size_t i = 0; i < 4; i++) {
@@ -194,6 +266,8 @@ int main(void)
     package("cache/old.pkg.tar", "installed", "0-1");
     package("cache/current.pkg.tar", "current", "2-1");
     write_file("cache/old.pkg.tar.sig", "signature");
+    cli_approval(config, AXON_CLEAN_CACHE, 1);
+    assert(access("cache/old.pkg.tar", F_OK) == 0 && access("cache/old.pkg.tar.sig", F_OK) == 0);
     write_file("cache/unknown.pkg.tar", "invalid archive");
     write_file("cache/incomplete.pkg.tar.part", "partial");
     assert(symlink("old.pkg.tar", "cache/link.pkg.tar") == 0);
@@ -212,6 +286,10 @@ int main(void)
     assert(lstat("cache/link.pkg.tar", &info) == 0 && S_ISLNK(info.st_mode));
     clean(config, "yes", AXON_OPERATION_OK);
     assert(previews == 0);
+    package("cache/approved.pkg.tar", "approved", "1-1");
+    write_file("cache/approved.pkg.tar.sig", "signature");
+    cli_approval(config, AXON_CLEAN_CACHE, 0);
+    assert(access("cache/approved.pkg.tar", F_OK) != 0 && access("cache/approved.pkg.tar.sig", F_OK) != 0);
     package("cache/race.pkg.tar", "race", "1-1");
     clean(config, "replace", AXON_OPERATION_BACKEND);
     assert(result.backend_error == ALPM_ERR_PKG_INVALID && !result.may_have_changes);

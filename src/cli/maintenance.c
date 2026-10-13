@@ -19,7 +19,8 @@ static int confirmation(void)
 {
     char line[16];
     fprintf(stderr, "%sProceed? [y/N]%s ", axon_color(stderr, AXON_PURPLE), axon_color(stderr, AXON_RESET));
-    if(interrupted || fflush(stdout) != 0 || fflush(stderr) != 0 || ferror(stdout)
+    if(interrupted || axon_output_failed() || fflush(stdout) != 0 || ferror(stdout)
+            || fflush(stderr) != 0 || ferror(stderr)
             || fgets(line, sizeof(line), stdin) == NULL) {
         return(0);
     }

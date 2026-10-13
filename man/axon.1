@@ -1,4 +1,4 @@
-.TH AXON 1 "2026-10-12" "Axon" "User Commands"
+.TH AXON 1 "2026-10-13" "Axon 0.1.0" "User Commands"
 .SH NAME
 axon \- manage NeurOS packages with libalpm
 .SH SYNOPSIS
@@ -114,6 +114,13 @@ Omitted package names select all installed packages.
 With \-Qkk, also verify recorded SHA-256 or MD5 checksums.
 Missing metadata or checksum coverage is reported as an inspection error.
 .PP
+Missing paths matched by NoExtract are accepted in \-Qk, \-Qkk and
+\-Qkk \-\-checksums. Patterns use libalpm matching, including wildcards,
+leading ! negation and pattern ordering. Directory patterns match the recorded
+path, including its trailing slash, in both presence and metadata checks.
+Existing files are still checked, and permission or other access errors remain
+failures even when the path matches NoExtract.
+.PP
 Modified backup configuration content is distinguished from damaged files;
 configuration type, permission and ownership errors still fail inspection.
 Diagnostics identify paths and packages and suggest recovery actions.
@@ -163,11 +170,18 @@ Omit backup-file preservation during removal.
 Keep targets required by other installed packages.
 .SS Approval and failure handling
 Mutations require root and explicit confirmation. Axon presents resolved changes,
-versions, sizes and flags before committing. HoldPkg protection applies to all
+package versions, total download size and installed-size change before committing.
+HoldPkg protection applies to all
 resolved removals, including cascades and replacements. Protected removals and
-downgrades require additional acknowledgment. Explicit ignored package/group
-targets are rejected. Signature, architecture, dependency, conflict and lock
+downgrades require additional acknowledgment. Explicitly requested packages
+matched by IgnorePkg or IgnoreGroup, including expanded group members, require
+an affirmative answer to the ignored-package prompt before preparation continues.
+Signature, architecture, dependency, conflict and lock
 checks remain active. There is no \-\-noconfirm option.
+.PP
+Failure to render or write the approval preview prevents approval and mutation.
+This includes installation-reason changes and cache removal: an answer is not
+consumed after an output failure, and the command reports failure.
 .PP
 Cancellation is cooperative. A running transfer or package operation may finish
 before interruption takes effect. A failed refresh may update some caches;
@@ -207,8 +221,11 @@ This command does not initialize missing databases or perform repairs.
 opens the package browser using the same backend policy and approval interfaces
 as the CLI. The screen lists available keys for browsing, filtering, details,
 installation/removal, upgrades and maintenance. Small terminals show a resize
-message. Failed or declined mutations retain a nonzero final exit status even
-if the user returns to browsing.
+message; interactive input/output and a terminal of at least 40 columns by
+8 rows are required for the normal display.
+Failed package transactions or maintenance commands, including database checks,
+and declined mutations retain final exit status 1 even if the user returns to
+browsing or a later action succeeds.
 .PP
 Externally supplied terminal control characters, invalid multibyte bytes and
 bidi controls are escaped. Labels are clipped by display columns without
@@ -233,7 +250,8 @@ Backend setup honors cache/hook/GPG/log paths, architectures, IgnorePkg,
 IgnoreGroup, NoUpgrade, NoExtract, UseSyslog, CheckSpace, ParallelDownloads,
 DownloadUser, download timeout/sandbox settings, servers and cache servers.
 HoldPkg and CleanMethod are enforced by the operation and maintenance layers.
-NoProgressBar disables progress bars. VerbosePkgLists and ILoveCandy are parsed
+NoProgressBar disables progress bars. Color is parsed; terminal detection and
+NO_COLOR control Axon's automatic colors. VerbosePkgLists and ILoveCandy are parsed
 but do not select alternate layouts. XferCommand is parsed but explicitly
 rejected during backend setup, including for queries.
 .PP
@@ -264,6 +282,11 @@ a missing requested package; or a declined/cancelled mutation.
 .TP
 .B 2
 Invalid options, combinations or required arguments.
+.TP
+.BI "128 + " N
+A CLI transaction or maintenance command interrupted by signal N;
+for example, 130 for SIGINT or 143 for SIGTERM. The browser retains status 1
+after an interrupted action when the user subsequently quits.
 .SH FILES
 .TP
 .I /etc/pacman.conf

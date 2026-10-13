@@ -101,6 +101,28 @@ static void finish(int expected)
     assert(access("db/db.lck", F_OK) != 0);
 }
 
+static void maintenance_action(axon_config_t *config, const char *key,
+                               const char *answer, const char *message, int expected)
+{
+    start(config, 24, 100);
+    expect("fixture");
+    send_keys(key);
+    if(answer != NULL) {
+        expect("Proceed?");
+        send_keys(answer);
+    }
+    expect("Press Enter to return");
+    assert(strstr(output, message));
+    send_keys("\n");
+    expect("fixture");
+    send_keys("o");
+    expect("Press Enter to return");
+    send_keys("\n");
+    expect("fixture");
+    send_keys("q");
+    finish(expected);
+}
+
 static int remove_entry(const char *path, const struct stat *info, int type, struct FTW *walk)
 {
     (void)info;
@@ -167,6 +189,19 @@ int main(void)
     assert(alpm_pkg_get_reason(package) == ALPM_PKG_REASON_EXPLICIT);
     assert(axon_alpm_release(&core) == 0);
 
+    authorized = 0;
+    maintenance_action(config, "e", NULL, "requires root", 1);
+    maintenance_action(config, "b", NULL, "requires root", 1);
+    maintenance_action(config, "c", NULL, "requires root", 1);
+    maintenance_action(config, "d", NULL, "malformed package record", 1);
+    write_file("db/local/fixture-1-1/files", "%FILES%\n\n");
+    maintenance_action(config, "d", NULL, "no repair performed", 0);
+    authorized = 1;
+    maintenance_action(config, "e", "n\n", "cancelled", 1);
+    maintenance_action(config, "b", "n\n", "cancelled", 1);
+    maintenance_action(config, "b", "y\n", "Installation reason changed", 0);
+    maintenance_action(config, "e", "y\n", "Installation reason changed", 0);
+    maintenance_action(config, "c", NULL, "No cache files eligible", 0);
     authorized = 0;
     start(config, 24, 100);
     expect("fixture");
